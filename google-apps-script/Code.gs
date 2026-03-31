@@ -177,7 +177,7 @@ function gpt_(model, system, user, maxTokens, isRetry) {
   const body = {
     model: model,
     messages: messages,
-    max_completion_tokens: maxTokens || 2000,
+    max_completion_tokens: maxTokens || 16000,  // gpt-5 needs high limit — reasoning tokens count against this
   };
 
   // Only add response_format for models that support it
@@ -532,7 +532,7 @@ function step3_initialDecision(app, research) {
 
   return gpt_(CONFIG.MODEL_DECISION, DECISION_PROMPT,
     `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nPrev attendance: ${app.prevAttendance}\nForums: ${app.prevForums}\nComments: ${app.comments}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
-    1500);
+    10000);
 }
 
 
@@ -602,7 +602,7 @@ function step4_synthesisReport(app, research, decision) {
 
   return gpt_(CONFIG.MODEL_SYNTHESIS, SYNTHESIS_PROMPT,
     `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nComments: ${app.comments}\nLinkedIn: ${research.linkedin || 'not found'}\nTwitter: ${research.twitter || 'not found'}\n\n## Initial Decision: ${decision.verdict}\nReasoning: ${decision.reasoning || 'N/A'}\n${decision.flag_reason ? 'Flag reason: ' + decision.flag_reason : ''}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
-    3000);
+    16000);
 }
 
 
@@ -703,7 +703,7 @@ function step6_updatedSynthesis(app, synthesis, deepResearch, decision) {
 
   return gpt_(CONFIG.MODEL_SYNTHESIS, UPDATED_SYNTHESIS_PROMPT,
     `## Applicant: ${app.name} at ${app.org}\n\n## Original Flag Reason\n${decision.flag_reason || decision.reasoning}\n\n## Original Synthesis\nWhat was found: ${JSON.stringify(synthesis.what_was_found)}\nWhat was unverified: ${JSON.stringify(synthesis.what_is_unverified)}\nInfo gaps: ${synthesis.information_gaps}\n\n## NEW Deeper Research (${deepResearch.results.length} results)\n${newArticles || 'No additional results found.'}`,
-    2000);
+    12000);
 }
 
 
@@ -743,7 +743,7 @@ Respond JSON:
 function step7_finalDecision(app, synthesis, updatedSynthesis, decision) {
   return gpt_(CONFIG.MODEL_DEEP_DECISION, FINAL_DECISION_PROMPT,
     `## Applicant: ${app.name}, ${app.title} at ${app.org}\n\n## Initial Decision: ${decision.verdict}\n${decision.reasoning}\nFlag reason: ${decision.flag_reason || 'N/A'}\n\n## Original Findings\n${JSON.stringify(synthesis.what_was_found)}\n\n## Deeper Research Findings\n${updatedSynthesis.updated_findings || 'No new findings'}\nResolved: ${JSON.stringify(updatedSynthesis.resolved_gaps)}\nRemaining: ${JSON.stringify(updatedSynthesis.remaining_gaps)}`,
-    1500);
+    10000);
 }
 
 
