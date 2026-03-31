@@ -494,11 +494,13 @@ REJECT if:
 - Promoting government agenda/propaganda/surveillance
 - Exception: documented dissent → FLAG instead
 
-FLAG if:
-- Government official from Partly Free state
+FLAG if ANY (these ALWAYS require human review, even if everything else checks out):
+- ANY government official, ministry employee, or state-affiliated person from ANY country — this ALWAYS requires human review regardless of how legitimate they appear
+- Web research surfaces a deceased person with the same or very similar name — identity confusion risk requires human verification
 - Cannot verify identity AND affiliations are vague/concerning
-- Conflicting signals
-- Confidence < 70%
+- Conflicting signals (e.g., name matches multiple different people)
+- Applicant's title is vague (e.g., "Employer" instead of a specific role)
+- Application details are sparse (no socials, no specific forums, generic interest statement)
 
 IMPORTANT: Do NOT provide a confidence score. Instead, answer these verification questions as true/false based ONLY on what the web research actually confirmed:
 
@@ -715,10 +717,13 @@ const FINAL_DECISION_PROMPT = `You are a senior vetting decision-maker resolving
 
 This applicant was flagged in the initial review. Additional targeted research has been conducted. Make a final decision.
 
-Rules (same as initial):
+Rules:
 - Bitcoin/crypto = POSITIVE
 - Govt ministry Not Free country = REJECT (unless documented dissent)
 - Students/early-career with confirmed identity = APPROVE
+- ANY government official/ministry employee from ANY country = MUST stay FLAGGED — even if identity is confirmed, government affiliations always require human review
+- Web research found a deceased person with same/similar name = MUST stay FLAGGED — identity confusion risk requires human verification
+- Name matched multiple different people = MUST stay FLAGGED
 - If STILL ambiguous after deeper research = keep FLAGGED with very specific reviewer instructions
 
 IMPORTANT: Do NOT provide a confidence score. Instead, answer the same verification questions — now updated with what the deeper research confirmed:
