@@ -769,15 +769,31 @@ function processOne_(sheet, row) {
     SpreadsheetApp.flush();
     const research = step2_webResearch(app);
 
+    // Report research results and errors visibly
+    const researchSummary = research.results.length + ' results, ' + research.orgResults.length + ' org results'
+      + (research.errors.length > 0 ? ' | ERRORS: ' + research.errors.join('; ') : '')
+      + ' | Searches: ' + research.searches.join(', ');
+    Logger.log('Row ' + row + ' research: ' + researchSummary);
+
+    // If Exa found NOTHING and there are errors, report it clearly
+    if (research.results.length === 0 && research.orgResults.length === 0 && research.errors.length > 0) {
+      setCell_(sheet, row, CONFIG.COL_STATUS, '⚠️ Exa errors: ' + research.errors.join('; '));
+      setCell_(sheet, row, CONFIG.COL_REASONING, 'Web research failed: ' + research.errors.join('; ') + '\n\nThis likely means the Exa API key is invalid or the API is down. Check HRF Vettor > Set API Keys.');
+      setCell_(sheet, row, CONFIG.COL_AI_VERDICT, 'ERROR');
+      SpreadsheetApp.flush();
+      return { name: app.name, verdict: 'ERROR', error: 'Exa failed' };
+    }
+
     // ── STEP 3: Initial Decision ──
-    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 3: Initial decision...');
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 3: Initial decision (' + research.results.length + ' sources)...');
     SpreadsheetApp.flush();
     const decision = step3_initialDecision(app, research);
 
     // Calculate confidence from verified factors (not GPT guess)
     const verifications = decision.verifications || {};
     const confidence = calculateConfidence_(app, research, verifications);
-    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + confidence + '%) — ' + (decision.headline_decision || ''));
+    const decisionReasoning = decision.reasoning || decision.justification || decision.explanation || 'No reasoning provided';
+    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + confidence + '%) — ' + (decision.headline_decision || decision.headline || ''));
 
     // ── STEP 4: Synthesis Report (ALL applicants) ──
     setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 4: Building report...');
@@ -799,8 +815,8 @@ function processOne_(sheet, row) {
       writeOutput_(sheet, row, start, {
         verdict: decision.verdict,
         confidence: confidence,
-        headline: decision.headline_decision,
-        reasoning: decision.reasoning,
+        headline: decision.headline_decision || decision.headline || '',
+        reasoning: decisionReasoning,
         whatFound: whatFound,
         nextSteps: nextSteps,
         whatReviewer: nextSteps,
@@ -845,8 +861,8 @@ function processOne_(sheet, row) {
     writeOutput_(sheet, row, start, {
       verdict: finalVerdict,
       confidence: finalConfidence,
-      headline: finalDecision.headline_decision || decision.headline_decision,
-      reasoning: decision.reasoning + '\n\n[After deeper research] ' + finalDecision.reasoning,
+      headline: finalDecision.headline_decision || finalDecision.headline || decision.headline_decision || decision.headline || '',
+      reasoning: decisionReasoning + '\n\n[After deeper research] ' + (finalDecision.reasoning || finalDecision.justification || finalDecision.explanation || 'No additional reasoning provided'),
       whatFound: mergedFound,
       nextSteps: mergedNextSteps,
       whatReviewer: mergedNextSteps,
