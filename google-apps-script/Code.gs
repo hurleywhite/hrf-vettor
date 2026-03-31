@@ -789,6 +789,13 @@ function processOne_(sheet, row) {
     // Write research profile to sheet
     writeSynthesis_(sheet, row, synthesis, research);
 
+    // Extract synthesis fields (GPT may return different key formats)
+    const whatFound = synthesis.what_was_found || synthesis.whatWasFound || synthesis.what_found || synthesis.confirmed_facts || [];
+    const nextSteps = synthesis.next_steps || synthesis.nextSteps || synthesis.next_steps_to_complete || [];
+
+    // Log for debugging
+    Logger.log('Synthesis keys for row ' + app.row + ': ' + Object.keys(synthesis).join(', '));
+
     // If APPROVED or REJECTED with sufficient confidence → done
     if ((decision.verdict === 'APPROVED' || decision.verdict === 'REJECTED') && confidence >= 70) {
       writeOutput_(sheet, row, start, {
@@ -796,9 +803,9 @@ function processOne_(sheet, row) {
         confidence: confidence,
         headline: decision.headline_decision,
         reasoning: decision.reasoning,
-        whatFound: synthesis.what_was_found,
-        nextSteps: synthesis.next_steps,
-        whatReviewer: synthesis.next_steps,
+        whatFound: whatFound,
+        nextSteps: nextSteps,
+        whatReviewer: nextSteps,
       });
       return { name: app.name, verdict: decision.verdict };
     }
@@ -824,10 +831,12 @@ function processOne_(sheet, row) {
     const finalConfidence = calculateConfidence_(app, research, finalVerifications);
     setCell_(sheet, row, CONFIG.COL_FINAL_DECISION, finalDecision.verdict + ' (' + finalConfidence + '%) — ' + (finalDecision.headline_decision || ''));
 
-    // Merge synthesis: combine original + deeper research findings
-    const mergedFound = [...(synthesis.what_was_found || []), ...(updatedSynthesis.updated_what_found || [])];
-    const mergedNextSteps = updatedSynthesis.remaining_next_steps || synthesis.next_steps || [];
-    const mergedSources = [...(synthesis.key_sources || []), ...(updatedSynthesis.new_key_sources || [])];
+    // Merge synthesis: combine original + deeper research findings (handle multiple key formats)
+    const updatedFound = updatedSynthesis.updated_what_found || updatedSynthesis.updatedWhatFound || updatedSynthesis.new_findings || [];
+    const mergedFound = [...whatFound, ...updatedFound];
+    const remainingSteps = updatedSynthesis.remaining_next_steps || updatedSynthesis.remainingNextSteps || updatedSynthesis.remaining_steps || nextSteps;
+    const mergedNextSteps = remainingSteps;
+    const mergedSources = [...(synthesis.key_sources || synthesis.keySources || []), ...(updatedSynthesis.new_key_sources || updatedSynthesis.newKeySources || [])];
 
     // Update sources with new ones
     setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, [...new Set(mergedSources)].join('\n'));
@@ -861,15 +870,27 @@ function processOne_(sheet, row) {
 // ============================================================
 
 function writeSynthesis_(sheet, row, syn, research) {
-  setCell_(sheet, row, CONFIG.COL_IDENTITY, syn.identity_summary || '');
-  setCell_(sheet, row, CONFIG.COL_PROFESSIONAL, syn.professional_background || '');
-  setCell_(sheet, row, CONFIG.COL_ORG_VERIFICATION, syn.organization_verification || '');
-  setCell_(sheet, row, CONFIG.COL_PUBLIC_PRESENCE, syn.public_presence || '');
-  setCell_(sheet, row, CONFIG.COL_HR_ALIGNMENT, syn.human_rights_alignment || '');
-  setCell_(sheet, row, CONFIG.COL_GOVT_CONNECTIONS, syn.government_connections || '');
-  setCell_(sheet, row, CONFIG.COL_RED_FLAGS, syn.red_flags || '');
-  setCell_(sheet, row, CONFIG.COL_INFO_GAPS, syn.next_steps_to_complete || '');
-  setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, (syn.key_sources || []).join('\n'));
+  // Helper: try multiple possible field names GPT might return
+  function get_(obj) {
+    for (let i = 1; i < arguments.length; i++) {
+      if (obj[arguments[i]]) return obj[arguments[i]];
+    }
+    return '';
+  }
+
+  // Log what we got back for debugging (visible in Apps Script execution log)
+  Logger.log('Synthesis keys for row ' + row + ': ' + Object.keys(syn).join(', '));
+
+  setCell_(sheet, row, CONFIG.COL_IDENTITY, get_(syn, 'identity_summary', 'identitySummary', 'identity'));
+  setCell_(sheet, row, CONFIG.COL_PROFESSIONAL, get_(syn, 'professional_background', 'professionalBackground', 'professional'));
+  setCell_(sheet, row, CONFIG.COL_ORG_VERIFICATION, get_(syn, 'organization_verification', 'organizationVerification', 'org_verification'));
+  setCell_(sheet, row, CONFIG.COL_PUBLIC_PRESENCE, get_(syn, 'public_presence', 'publicPresence', 'public'));
+  setCell_(sheet, row, CONFIG.COL_HR_ALIGNMENT, get_(syn, 'human_rights_alignment', 'humanRightsAlignment', 'hr_alignment'));
+  setCell_(sheet, row, CONFIG.COL_GOVT_CONNECTIONS, get_(syn, 'government_connections', 'governmentConnections', 'govt_connections'));
+  setCell_(sheet, row, CONFIG.COL_RED_FLAGS, get_(syn, 'red_flags', 'redFlags', 'flags'));
+  setCell_(sheet, row, CONFIG.COL_INFO_GAPS, get_(syn, 'next_steps_to_complete', 'nextStepsToComplete', 'next_steps_narrative'));
+  const sources = syn.key_sources || syn.keySources || syn.sources || [];
+  setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, (Array.isArray(sources) ? sources : []).join('\n'));
   if (research.linkedin) setCell_(sheet, row, CONFIG.COL_LINKEDIN_URL, research.linkedin);
   if (research.twitter) setCell_(sheet, row, CONFIG.COL_TWITTER_URL, research.twitter);
 }
