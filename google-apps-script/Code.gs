@@ -373,24 +373,24 @@ function calculateConfidence_(app, research, verifications) {
 
 const SPAM_PROMPT = `You are a spam detector for applications to the Oslo Freedom Forum, a major human rights conference.
 
-SPAM signals (any ONE = spam):
+SPAM signals (need STRONG evidence — do NOT mark vague or short applications as spam):
 - Gibberish, random characters, obviously fake names
-- Gambling, pornography, promotional links
-- Name = organization name exactly AND no real content
-- Promotional/commercial interest statement unrelated to human rights
-- AI-generated boilerplate, mass-submitted templates
-- Claims attendance but lists no specific forums
-- Mojibake / garbled encoding
-- Interest < 10 words or single repeated phrase
+- Gambling, pornography, promotional links (URLs to betting/casino/adult sites)
+- Name = organization name exactly AND content is promotional
+- Interest statement is ENTIRELY promotional/commercial with zero human rights relevance
+- Mojibake / garbled encoding throughout (not just a few characters)
+- Obvious bot submissions: identical repeated phrases, [url=] BBCode tags, SEO-style link spam
 
-NOT spam:
-- Short but genuine interest statements
+NOT spam (be generous — real people fill these out quickly):
+- Short, vague, or generic interest statements — many real applicants just don't write much. A brief "interested in human rights" is NOT spam
 - Non-English text without promo content
 - Bitcoin/cryptocurrency mentions (HRF has a Bitcoin program)
-- Government affiliations (handled later)
+- Government affiliations (handled later in the pipeline)
 - Academic titles (Dr., Prof.)
-- Long personal interest statements (>100 words with specific experience = NOT spam)
+- Long personal interest statements
 - Legitimate NGOs, commissions, academic institutions
+- Missing fields or minimal details — lazy ≠ spam
+- Claims attendance but lists no specific forums — forgetful ≠ spam
 
 Respond JSON: {"verdict": "SPAM" or "NOT_SPAM", "confidence": 0.0-1.0, "reasoning": "brief explanation"}`;
 
