@@ -756,7 +756,12 @@ function processOne_(sheet, row) {
     const spam = step1_spamFilter(app);
     setCell_(sheet, row, CONFIG.COL_SPAM_RESULT, spam.verdict + ' (' + Math.round((spam.confidence || 0) * 100) + '%) — ' + spam.reasoning);
 
-    if (spam.verdict === 'SPAM' && spam.confidence >= CONFIG.SPAM_THRESHOLD) {
+    // Normalize verdict (GPT may return 'Spam', 'spam', 'SPAM', etc.)
+    const spamVerdict = (spam.verdict || '').toUpperCase().trim();
+    // Handle confidence as decimal (0.95) or percentage (95)
+    const spamConf = spam.confidence > 1 ? spam.confidence / 100 : spam.confidence;
+
+    if (spamVerdict === 'SPAM' && spamConf >= CONFIG.SPAM_THRESHOLD) {
       writeOutput_(sheet, row, start, {
         verdict: 'SPAM', confidence: spam.confidence,
         headline: 'Spam: ' + spam.reasoning,
@@ -810,10 +815,13 @@ function processOne_(sheet, row) {
     // Log for debugging
     Logger.log('Synthesis keys for row ' + app.row + ': ' + Object.keys(synthesis).join(', '));
 
-    // If APPROVED or REJECTED with sufficient confidence → done
-    if ((decision.verdict === 'APPROVED' || decision.verdict === 'REJECTED') && confidence >= 70) {
+    // Normalize decision verdict
+    const dv = (decision.verdict || '').toUpperCase().trim();
+
+    // Trust REJECTED regardless of confidence, APPROVED needs >= 70%
+    if (dv === 'REJECTED' || (dv === 'APPROVED' && confidence >= 70)) {
       writeOutput_(sheet, row, start, {
-        verdict: decision.verdict,
+        verdict: dv,
         confidence: confidence,
         headline: decision.headline_decision || decision.headline || '',
         reasoning: decisionReasoning,
@@ -855,8 +863,15 @@ function processOne_(sheet, row) {
     // Update sources with new ones
     setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, [...new Set(mergedSources)].join('\n'));
 
-    const finalVerdict = finalConfidence >= 70 && (finalDecision.verdict === 'APPROVED' || finalDecision.verdict === 'REJECTED')
-      ? finalDecision.verdict : 'FLAGGED';
+    // Normalize final verdict (handle case variations)
+    const fv = (finalDecision.verdict || '').toUpperCase().trim();
+
+    // Trust REJECTED regardless of confidence (low confidence on reject = "nothing found to verify")
+    // Trust APPROVED only with high confidence (need evidence to approve)
+    // Otherwise FLAGGED for human review
+    const finalVerdict = fv === 'REJECTED' ? 'REJECTED'
+      : (fv === 'APPROVED' && finalConfidence >= 70) ? 'APPROVED'
+      : 'FLAGGED';
 
     writeOutput_(sheet, row, start, {
       verdict: finalVerdict,
