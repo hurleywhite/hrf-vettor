@@ -65,7 +65,7 @@ const CONFIG = {
   MODEL_DEEP_DECISION: 'gpt-5',
 
   // Thresholds
-  BATCH_SIZE: 3,
+  BATCH_SIZE: 10,
   SPAM_THRESHOLD: 0.95,
   CONFIDENCE_THRESHOLD: 70,  // 70% calculated confidence needed to auto-resolve
 };
