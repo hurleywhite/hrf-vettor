@@ -1,17 +1,22 @@
 /**
  * HRF OFF Vettor v2 — Google Apps Script Edition
- * 3-stage AI vetting pipeline for Oslo Freedom Forum applicants
+ * 7-step AI vetting pipeline for Oslo Freedom Forum applicants
  *
- * Stage 1: Spam detection (gpt-4o-mini)
- * Stage 2: Exa.ai web research + GPT-5 reasoning verdict
- * Stage 3: Deep review for ambiguous cases (o3-mini)
+ * Flow:
+ *   1. Spam Filter        (gpt-4o-mini) — quick junk detection
+ *   2. Web Research        (Exa.ai)      — 3 searches per person
+ *   3. Initial Decision    (gpt-5)       — Approved / Flagged / Rejected
+ *   4. Synthesis Report    (gpt-5)       — what was found, what's missing, why
+ *   5. Deeper Research     (Exa.ai)      — targeted follow-up for FLAGGED only
+ *   6. Updated Synthesis   (gpt-5)       — incorporate new findings
+ *   7. Final Decision      (gpt-5)       — resolve the flag
  *
  * Setup:
- * 1. Open Script Properties (Project Settings > Script Properties)
- * 2. Add: OPENAI_API_KEY = your OpenAI key
- * 3. Add: EXA_API_KEY = your Exa.ai key
- * 4. Run setupSheet() once to create the output columns
- * 5. Use the "HRF Vettor" menu to run the pipeline
+ *   1. Paste this into Extensions > Apps Script
+ *   2. Click HRF Vettor > Set API Keys
+ *   3. Click HRF Vettor > Setup Output Columns
+ *   4. Paste applicant data into columns A-M
+ *   5. Click HRF Vettor > Run Pipeline
  */
 
 // ============================================================
@@ -19,11 +24,9 @@
 // ============================================================
 
 const CONFIG = {
-  // Sheet names
   INPUT_SHEET: 'Applicants',
 
-  // Input columns (letters) — these match the original spreadsheet
-  // NOTE: No email column — removed for privacy
+  // Input columns (A-M) — no email
   COL_NAME: 'A',
   COL_TITLE: 'B',
   COL_ORG: 'C',
@@ -38,44 +41,44 @@ const CONFIG = {
   COL_FACEBOOK: 'L',
   COL_OTHER_SOCIAL: 'M',
 
-  // Output columns (start after input)
-  COL_HRF_TRUTH: 'N',        // HRF ground truth (for testing)
-  COL_STATUS: 'O',           // Processing status
-  COL_AI_VERDICT: 'P',       // Final AI verdict
-  COL_CONFIDENCE: 'Q',       // Overall confidence
-  COL_HEADLINE: 'R',         // One-line decision headline
-  COL_REASONING: 'S',        // Detailed reasoning
-  COL_NEXT_STEP: 'T',        // Recommended next step
-  COL_CONFIRMED: 'U',        // Scorecard: confirmed facts
-  COL_NOT_FOUND: 'V',        // Scorecard: not found
-  COL_CONCERNING: 'W',       // Scorecard: concerning
-  COL_IDENTITY: 'X',         // Identity summary from research
-  COL_PROFESSIONAL: 'Y',     // Professional background
-  COL_ORG_VERIFICATION: 'Z', // Organization verification
-  COL_PUBLIC_PRESENCE: 'AA',  // Public presence
-  COL_HR_ALIGNMENT: 'AB',    // Human rights alignment
-  COL_GOVT_CONNECTIONS: 'AC', // Government connections
-  COL_RED_FLAGS: 'AD',       // Red flags
-  COL_INFO_GAPS: 'AE',       // Information gaps
-  COL_LINKEDIN_URL: 'AF',    // LinkedIn URL found
-  COL_TWITTER_URL: 'AG',     // Twitter URL found
-  COL_KEY_SOURCES: 'AH',     // Key source URLs
-  COL_STAGE1_VERDICT: 'AI',  // Stage 1 result
-  COL_STAGE3_VERDICT: 'AJ',  // Stage 3 result (if run)
-  COL_LATENCY: 'AK',         // Total processing time
-  COL_REVIEWER_NOTE: 'AL',   // Human reviewer notes
+  // Output columns
+  COL_HRF_TRUTH: 'N',           // Ground truth (testing only)
+  COL_STATUS: 'O',              // Processing status
+  COL_AI_VERDICT: 'P',          // Final verdict
+  COL_CONFIDENCE: 'Q',          // Confidence %
+  COL_HEADLINE: 'R',            // One-line headline decision
+  COL_WHAT_FOUND: 'S',          // Synthesis: what was found
+  COL_WHAT_MISSING: 'T',        // Synthesis: what's still unverified
+  COL_WHAT_REVIEWER_SHOULD: 'U',// Synthesis: what reviewer should check
+  COL_REASONING: 'V',           // Full reasoning
+  COL_IDENTITY: 'W',            // Identity summary
+  COL_PROFESSIONAL: 'X',        // Professional background
+  COL_ORG_VERIFICATION: 'Y',    // Org verification
+  COL_PUBLIC_PRESENCE: 'Z',     // Public presence
+  COL_HR_ALIGNMENT: 'AA',       // Human rights alignment
+  COL_GOVT_CONNECTIONS: 'AB',   // Government connections
+  COL_RED_FLAGS: 'AC',          // Red flags
+  COL_INFO_GAPS: 'AD',          // Information gaps
+  COL_LINKEDIN_URL: 'AE',       // LinkedIn found
+  COL_TWITTER_URL: 'AF',        // Twitter found
+  COL_KEY_SOURCES: 'AG',        // Source URLs
+  COL_SPAM_RESULT: 'AH',        // Step 1 result
+  COL_INITIAL_DECISION: 'AI',   // Step 3 result
+  COL_DEEP_RESEARCH: 'AJ',      // Step 5 result (if flagged)
+  COL_FINAL_DECISION: 'AK',     // Step 7 result (if flagged)
+  COL_LATENCY: 'AL',            // Processing time
+  COL_REVIEWER_NOTE: 'AM',      // Human reviewer notes
 
   // Models
   MODEL_SPAM: 'gpt-4o-mini',
-  MODEL_RESEARCH: 'gpt-5',
-  MODEL_VERDICT: 'gpt-5',
-  MODEL_DEEP: 'o3-mini',
+  MODEL_DECISION: 'gpt-5',
+  MODEL_SYNTHESIS: 'gpt-5',
+  MODEL_DEEP_DECISION: 'gpt-5',
 
-  // Processing limits
-  BATCH_SIZE: 3,  // Process 3 per run (6-min Apps Script limit)
-  SPAM_CONFIDENCE_THRESHOLD: 0.95,
-  FLAG_THRESHOLD: 0.70,
-  DEEP_RESOLVE_THRESHOLD: 0.80,
+  // Thresholds
+  BATCH_SIZE: 3,
+  SPAM_THRESHOLD: 0.95,
+  RESOLVE_THRESHOLD: 0.70,
 };
 
 
@@ -84,8 +87,7 @@ const CONFIG = {
 // ============================================================
 
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('🔍 HRF Vettor')
+  SpreadsheetApp.getUi().createMenu('🔍 HRF Vettor')
     .addItem('▶️ Run Pipeline (next batch)', 'runNextBatch')
     .addItem('▶️ Run Pipeline (ALL remaining)', 'runAllRemaining')
     .addItem('🔄 Run Single Row (selected)', 'runSelectedRow')
@@ -101,23 +103,18 @@ function onOpen() {
 function setupOutputColumns() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(CONFIG.INPUT_SHEET);
-  if (!sheet) {
-    sheet = ss.getActiveSheet();
-    sheet.setName(CONFIG.INPUT_SHEET);
-  }
+  if (!sheet) { sheet = ss.getActiveSheet(); sheet.setName(CONFIG.INPUT_SHEET); }
 
-  // Set header row for output columns
   const headers = {
     [CONFIG.COL_HRF_TRUTH]: 'HRF Ground Truth',
     [CONFIG.COL_STATUS]: 'Status',
     [CONFIG.COL_AI_VERDICT]: 'AI Verdict',
     [CONFIG.COL_CONFIDENCE]: 'Confidence',
     [CONFIG.COL_HEADLINE]: 'Headline Decision',
-    [CONFIG.COL_REASONING]: 'Reasoning',
-    [CONFIG.COL_NEXT_STEP]: 'Recommended Next Step',
-    [CONFIG.COL_CONFIRMED]: 'Confirmed Facts',
-    [CONFIG.COL_NOT_FOUND]: 'Not Found',
-    [CONFIG.COL_CONCERNING]: 'Concerning',
+    [CONFIG.COL_WHAT_FOUND]: 'What Was Found',
+    [CONFIG.COL_WHAT_MISSING]: 'What Is Still Unverified',
+    [CONFIG.COL_WHAT_REVIEWER_SHOULD]: 'What Reviewer Should Check',
+    [CONFIG.COL_REASONING]: 'Full Reasoning',
     [CONFIG.COL_IDENTITY]: 'Identity Summary',
     [CONFIG.COL_PROFESSIONAL]: 'Professional Background',
     [CONFIG.COL_ORG_VERIFICATION]: 'Organization Verification',
@@ -129,54 +126,49 @@ function setupOutputColumns() {
     [CONFIG.COL_LINKEDIN_URL]: 'LinkedIn URL',
     [CONFIG.COL_TWITTER_URL]: 'Twitter/X URL',
     [CONFIG.COL_KEY_SOURCES]: 'Key Sources',
-    [CONFIG.COL_STAGE1_VERDICT]: 'Stage 1 (Spam)',
-    [CONFIG.COL_STAGE3_VERDICT]: 'Stage 3 (Deep Review)',
+    [CONFIG.COL_SPAM_RESULT]: 'Step 1: Spam Check',
+    [CONFIG.COL_INITIAL_DECISION]: 'Step 3: Initial Decision',
+    [CONFIG.COL_DEEP_RESEARCH]: 'Step 5: Deeper Research',
+    [CONFIG.COL_FINAL_DECISION]: 'Step 7: Final Decision',
     [CONFIG.COL_LATENCY]: 'Processing Time',
     [CONFIG.COL_REVIEWER_NOTE]: 'Reviewer Notes',
   };
 
   for (const [col, label] of Object.entries(headers)) {
-    const colNum = columnLetterToNumber_(col);
-    sheet.getRange(1, colNum).setValue(label).setFontWeight('bold').setBackground('#334155').setFontColor('#e2e8f0');
+    const n = colToNum_(col);
+    sheet.getRange(1, n).setValue(label).setFontWeight('bold').setBackground('#334155').setFontColor('#e2e8f0');
   }
 
-  // Color-code verdict column
-  sheet.setColumnWidth(columnLetterToNumber_(CONFIG.COL_AI_VERDICT), 120);
-  sheet.setColumnWidth(columnLetterToNumber_(CONFIG.COL_HEADLINE), 300);
-  sheet.setColumnWidth(columnLetterToNumber_(CONFIG.COL_REASONING), 400);
-  sheet.setColumnWidth(columnLetterToNumber_(CONFIG.COL_NEXT_STEP), 300);
-  sheet.setColumnWidth(columnLetterToNumber_(CONFIG.COL_REVIEWER_NOTE), 300);
-
-  // Freeze header row
+  // Set useful column widths
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_HEADLINE), 300);
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_WHAT_FOUND), 350);
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_WHAT_MISSING), 300);
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_WHAT_REVIEWER_SHOULD), 300);
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_REASONING), 400);
+  sheet.setColumnWidth(colToNum_(CONFIG.COL_REVIEWER_NOTE), 300);
   sheet.setFrozenRows(1);
 
-  SpreadsheetApp.getUi().alert('✅ Output columns set up! You can now run the pipeline from the HRF Vettor menu.');
+  SpreadsheetApp.getUi().alert('✅ Output columns created! Paste your applicant data into columns A-M, then run the pipeline.');
 }
 
 function promptForApiKeys() {
   const ui = SpreadsheetApp.getUi();
-
   const props = PropertiesService.getScriptProperties();
-  const existingOai = props.getProperty('OPENAI_API_KEY');
-  const existingExa = props.getProperty('EXA_API_KEY');
 
-  const oaiResult = ui.prompt('OpenAI API Key',
-    'Enter your OpenAI API key (starts with sk-proj-).\n' +
-    (existingOai ? '✅ Current key: ' + existingOai.substring(0, 15) + '...' : '❌ No key set'),
+  const oai = props.getProperty('OPENAI_API_KEY');
+  const exa = props.getProperty('EXA_API_KEY');
+
+  const r1 = ui.prompt('OpenAI API Key',
+    'Enter your OpenAI key (starts with sk-proj-).\n' + (oai ? '✅ Key set: ' + oai.substring(0, 15) + '...' : '❌ No key'),
     ui.ButtonSet.OK_CANCEL);
+  if (r1.getSelectedButton() == ui.Button.OK && r1.getResponseText().trim())
+    props.setProperty('OPENAI_API_KEY', r1.getResponseText().trim());
 
-  if (oaiResult.getSelectedButton() == ui.Button.OK && oaiResult.getResponseText().trim()) {
-    props.setProperty('OPENAI_API_KEY', oaiResult.getResponseText().trim());
-  }
-
-  const exaResult = ui.prompt('Exa.ai API Key',
-    'Enter your Exa.ai API key.\n' +
-    (existingExa ? '✅ Current key: ' + existingExa.substring(0, 10) + '...' : '❌ No key set'),
+  const r2 = ui.prompt('Exa.ai API Key',
+    'Enter your Exa key.\n' + (exa ? '✅ Key set: ' + exa.substring(0, 10) + '...' : '❌ No key'),
     ui.ButtonSet.OK_CANCEL);
-
-  if (exaResult.getSelectedButton() == ui.Button.OK && exaResult.getResponseText().trim()) {
-    props.setProperty('EXA_API_KEY', exaResult.getResponseText().trim());
-  }
+  if (r2.getSelectedButton() == ui.Button.OK && r2.getResponseText().trim())
+    props.setProperty('EXA_API_KEY', r2.getResponseText().trim());
 
   ui.alert('✅ API keys saved!');
 }
@@ -186,371 +178,350 @@ function promptForApiKeys() {
 // API HELPERS
 // ============================================================
 
-function getApiKey_(name) {
-  const key = PropertiesService.getScriptProperties().getProperty(name);
-  if (!key) throw new Error(`Missing API key: ${name}. Go to HRF Vettor > Set API Keys`);
-  return key;
+function getKey_(name) {
+  const k = PropertiesService.getScriptProperties().getProperty(name);
+  if (!k) throw new Error('Missing: ' + name + '. Go to HRF Vettor > Set API Keys');
+  return k;
 }
 
-function openaiChat_(model, messages, maxTokens, temperature, jsonMode) {
-  maxTokens = maxTokens || 2000;
-  jsonMode = jsonMode !== false;
-
+function gpt_(model, system, user, maxTokens) {
   const body = {
     model: model,
-    messages: messages,
-    max_completion_tokens: maxTokens,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    max_completion_tokens: maxTokens || 2000,
+    response_format: { type: 'json_object' },
   };
-  if (temperature !== undefined && temperature !== null) body.temperature = temperature;
-  if (jsonMode) body.response_format = { type: 'json_object' };
 
-  const response = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
+  const r = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
     method: 'post',
-    headers: {
-      'Authorization': 'Bearer ' + getApiKey_('OPENAI_API_KEY'),
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': 'Bearer ' + getKey_('OPENAI_API_KEY'), 'Content-Type': 'application/json' },
     payload: JSON.stringify(body),
     muteHttpExceptions: true,
   });
 
-  const code = response.getResponseCode();
-  const data = JSON.parse(response.getContentText());
-  if (code !== 200) throw new Error('OpenAI ' + code + ': ' + JSON.stringify(data));
+  if (r.getResponseCode() !== 200) throw new Error('OpenAI ' + r.getResponseCode() + ': ' + r.getContentText());
+  const raw = JSON.parse(r.getContentText()).choices[0].message.content || '{}';
 
-  return data.choices[0].message.content || '{}';
-}
-
-function exaSearch_(query, numResults) {
-  numResults = numResults || 10;
-
-  const response = UrlFetchApp.fetch('https://api.exa.ai/search', {
-    method: 'post',
-    headers: {
-      'x-api-key': getApiKey_('EXA_API_KEY'),
-      'Content-Type': 'application/json',
-    },
-    payload: JSON.stringify({
-      query: query,
-      numResults: numResults,
-      contents: {
-        text: { maxCharacters: 3000 },
-        highlights: { numSentences: 5 },
-      },
-    }),
-    muteHttpExceptions: true,
-  });
-
-  const code = response.getResponseCode();
-  if (code !== 200) throw new Error('Exa ' + code + ': ' + response.getContentText());
-
-  return JSON.parse(response.getContentText());
-}
-
-function parseJSON_(raw) {
-  let s = raw || '{}';
+  // Parse JSON (handle markdown code blocks)
+  let s = raw;
   if (s.indexOf('```json') !== -1) s = s.split('```json')[1].split('```')[0];
   else if (s.indexOf('```') !== -1) s = s.split('```')[1].split('```')[0];
   return JSON.parse(s.trim() || '{}');
 }
 
+function exa_(query, numResults) {
+  const r = UrlFetchApp.fetch('https://api.exa.ai/search', {
+    method: 'post',
+    headers: { 'x-api-key': getKey_('EXA_API_KEY'), 'Content-Type': 'application/json' },
+    payload: JSON.stringify({
+      query: query,
+      numResults: numResults || 10,
+      contents: { text: { maxCharacters: 3000 }, highlights: { numSentences: 5 } },
+    }),
+    muteHttpExceptions: true,
+  });
+
+  if (r.getResponseCode() !== 200) throw new Error('Exa ' + r.getResponseCode() + ': ' + r.getContentText());
+  return JSON.parse(r.getContentText());
+}
+
 
 // ============================================================
-// PROMPTS (identical to Python pipeline)
+// STEP 1: SPAM FILTER (gpt-4o-mini)
 // ============================================================
 
-const SPAM_PROMPT = `You are a spam detector for applications to the Oslo Freedom Forum, a major human rights conference hosted by the Human Rights Foundation.
+const SPAM_PROMPT = `You are a spam detector for applications to the Oslo Freedom Forum, a major human rights conference.
 
-Your ONLY job is to determine if this application is SPAM or NOT SPAM.
+SPAM signals (any ONE = spam):
+- Gibberish, random characters, obviously fake names
+- Gambling, pornography, promotional links
+- Name = organization name exactly AND no real content
+- Promotional/commercial interest statement unrelated to human rights
+- AI-generated boilerplate, mass-submitted templates
+- Claims attendance but lists no specific forums
+- Mojibake / garbled encoding
+- Interest < 10 words or single repeated phrase
 
-SPAM signals (any ONE is sufficient to mark as spam):
-- Gibberish, random characters, or obviously fake names
-- Gambling, pornography, or promotional links in any field
-- Name matches organization name exactly AND no real content
-- Interest statement contains URLs or promotional/commercial language unrelated to human rights
-- AI-generated boilerplate that is clearly mass-submitted
-- Claims previous attendance = "Yes" but lists no specific forum names
-- Mojibake / garbled encoding in interest statement
-- Interest statement is fewer than 10 words or a single repeated phrase
+NOT spam:
+- Short but genuine interest statements
+- Non-English text without promo content
+- Bitcoin/cryptocurrency mentions (HRF has a Bitcoin program)
+- Government affiliations (handled later)
+- Academic titles (Dr., Prof.)
+- Long personal interest statements (>100 words with specific experience = NOT spam)
+- Legitimate NGOs, commissions, academic institutions
 
-NOT spam (do NOT flag these):
-- Short or simple interest statements (if they seem genuine and personal)
-- Non-English text without promotional content
-- Bitcoin or cryptocurrency mentions — HRF has a significant Bitcoin freedom program
-- Government affiliations — handled by later stages, not spam
-- Names with academic titles or prefixes (Dr., Prof., etc.)
-- Long, detailed, personal interest statements
-- Applications from people at legitimate-sounding NGOs, commissions, or academic institutions
-- CRITICAL: If the interest statement is longer than 100 words and discusses specific personal experience, it is NOT spam regardless of other signals.
+Respond JSON: {"verdict": "SPAM" or "NOT_SPAM", "confidence": 0.0-1.0, "reasoning": "brief explanation"}`;
 
-Respond with JSON only:
-{"verdict": "SPAM" or "NOT_SPAM", "confidence": 0.0-1.0, "reasoning": "brief explanation"}`;
+function step1_spamFilter(app) {
+  return gpt_(CONFIG.MODEL_SPAM, SPAM_PROMPT,
+    `Name: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nHow heard: ${app.howHeard}\nInterest: ${app.interest}\nPrev attendance: ${app.prevAttendance}\nPrev forums: ${app.prevForums}\nComments: ${app.comments}\nSocials: Twitter=${app.twitter}, LinkedIn=${app.linkedin}, Instagram=${app.instagram}`,
+    300);
+}
 
 
-const RESEARCH_PROMPT = `You are a research analyst building a comprehensive person profile for the Oslo Freedom Forum vetting team.
+// ============================================================
+// STEP 2: WEB RESEARCH (Exa.ai — 3 searches)
+// ============================================================
 
-Synthesize all available evidence into a structured person profile. Every claim must cite a source URL.
+function step2_webResearch(app) {
+  const research = { results: [], orgResults: [], linkedin: null, twitter: null, errors: [], searches: [] };
 
-Build this profile:
-1. **Identity Summary**: Who is this person? Real name confirmed? Multiple sources confirm same person?
-2. **Professional Background**: Current role, past roles, education, expertise. Cite specific URLs.
-3. **Organization Verification**: Is the stated organization real? What does it do? Is this person actually affiliated?
-4. **Public Presence & Reputation**: Published articles, media mentions, conference appearances.
-5. **Social Media Footprint**: Which platforms found, content themes, activity level.
-6. **Human Rights Alignment**: Evidence of human rights work, civil society engagement, activism, journalism, Bitcoin/freedom tech.
-7. **Government Connections**: Any government affiliations? Which government? Country's Freedom House status?
-8. **Red Flags**: State propaganda links, authoritarian connections, inconsistencies.
-9. **Information Gaps**: What could NOT be found despite searching?
+  // Search 1: Person + Org
+  try {
+    const d = exa_(app.name + ' ' + app.org, 10);
+    research.searches.push('person+org');
+    for (const r of (d.results || [])) {
+      const entry = { title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 2000), highlights: r.highlights || [] };
+      research.results.push(entry);
+      if (r.url && r.url.indexOf('linkedin.com/in/') !== -1 && !research.linkedin) research.linkedin = r.url;
+      if (r.url && (r.url.indexOf('twitter.com/') !== -1 || r.url.indexOf('x.com/') !== -1) && !research.twitter) research.twitter = r.url;
+    }
+  } catch (e) { research.errors.push('Person: ' + e.message); }
 
-IMPORTANT: Cite URLs for every factual claim.
+  // Search 2: Organization
+  if (app.org && app.org.length > 3) {
+    try {
+      const d = exa_(app.org + ' organization', 5);
+      research.searches.push('org');
+      for (const r of (d.results || [])) research.orgResults.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+    } catch (e) { research.errors.push('Org: ' + e.message); }
+  }
 
-Respond with JSON:
+  // Search 3: News/activism
+  try {
+    const d = exa_('"' + app.name + '" human rights OR activism OR conference', 5);
+    research.searches.push('news');
+    const urls = new Set(research.results.map(e => e.url));
+    for (const r of (d.results || [])) {
+      if (!urls.has(r.url)) research.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+    }
+  } catch (e) { research.errors.push('News: ' + e.message); }
+
+  // Add applicant-provided social links
+  if (app.linkedin && app.linkedin.length > 5 && !research.linkedin) research.linkedin = app.linkedin;
+  if (app.twitter && app.twitter.length > 5 && !research.twitter) research.twitter = app.twitter;
+
+  return research;
+}
+
+
+// ============================================================
+// STEP 3: INITIAL DECISION (gpt-5)
+// ============================================================
+
+const DECISION_PROMPT = `You are a vetting decision-maker for the Oslo Freedom Forum (HRF).
+
+You will receive an applicant's application AND web research results from Exa.ai. Make a decision.
+
+APPROVE if ANY:
+- Person/org found in web results with legitimate context
+- Bitcoin/crypto = STRONG POSITIVE (HRF Bitcoin program)
+- Students, academics, early-career = welcome (thin web presence is normal)
+- Verified NGO/civil society/media/startup
+- Genuine human rights knowledge in interest statement
+- Refugee support, press freedom, digital rights, financial inclusion
+- When in doubt between APPROVE and FLAG → lean APPROVE if no red flags
+
+REJECT if:
+- Government ministry/state security in Not Free country (Afghanistan, Belarus, China, Cuba, Egypt, Eritrea, Ethiopia, Iran, Myanmar, North Korea, Russia, Saudi Arabia, Somalia, South Sudan, Sudan, Syria, Tajikistan, Turkmenistan, UAE, Uzbekistan, Venezuela, Yemen)
+- Promoting government agenda/propaganda/surveillance
+- Exception: documented dissent → FLAG instead
+
+FLAG if:
+- Government official from Partly Free state
+- Cannot verify identity AND affiliations are vague/concerning
+- Conflicting signals
+- Confidence < 70%
+
+Respond JSON:
+{
+  "verdict": "APPROVED" or "FLAGGED" or "REJECTED",
+  "overall_confidence": 0.0-1.0,
+  "headline_decision": "One sentence: what was confirmed and why this decision",
+  "reasoning": "2-4 sentences",
+  "flag_reason": "If FLAGGED: what specific info is missing that would resolve this?"
+}`;
+
+function step3_initialDecision(app, research) {
+  let articlesText = '';
+  for (let i = 0; i < Math.min(research.results.length, 12); i++) {
+    const a = research.results[i];
+    articlesText += '\n--- Source ' + (i + 1) + ': ' + a.title + ' ---\nURL: ' + a.url + '\n' + (a.text || '').substring(0, 1200) + '\n';
+  }
+  let orgText = '';
+  for (const a of research.orgResults.slice(0, 5)) {
+    orgText += '\n--- ' + a.title + ' ---\nURL: ' + a.url + '\n' + (a.text || '').substring(0, 800) + '\n';
+  }
+
+  return gpt_(CONFIG.MODEL_DECISION, DECISION_PROMPT,
+    `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nPrev attendance: ${app.prevAttendance}\nForums: ${app.prevForums}\nComments: ${app.comments}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
+    1500);
+}
+
+
+// ============================================================
+// STEP 4: SYNTHESIS REPORT (gpt-5 — runs for ALL applicants)
+// ============================================================
+
+const SYNTHESIS_PROMPT = `You are a research analyst writing a vetting report for the Oslo Freedom Forum team.
+
+You have an applicant's data, web research, and an initial AI decision. Write a structured report that a human reviewer can use.
+
+Your report MUST include:
+1. **Identity Summary**: Who is this person based on what was found?
+2. **Professional Background**: Roles, education, expertise — cite URLs
+3. **Organization Verification**: Is the org real? What does it do? Is this person affiliated?
+4. **Public Presence**: Articles, media, conferences — cite URLs
+5. **Human Rights Alignment**: Evidence of HR work, activism, journalism, Bitcoin/freedom tech
+6. **Government Connections**: Any govt ties? Which country? Freedom House status?
+7. **Red Flags**: Inconsistencies, propaganda links, authoritarian connections
+8. **Information Gaps**: What could NOT be found
+
+Then provide three synthesis fields:
+- **what_was_found**: Bullet list of confirmed facts with source URLs
+- **what_is_unverified**: Bullet list of claims that couldn't be verified
+- **what_reviewer_should_check**: Specific actions for the human reviewer (e.g., "Check LinkedIn profile at [url] to confirm current role")
+
+Cite URLs for every factual claim. If nothing found, say so.
+
+Respond JSON:
 {
   "identity_summary": "...",
   "professional_background": "...",
   "organization_verification": "...",
   "public_presence": "...",
-  "social_media_footprint": "...",
   "human_rights_alignment": "...",
   "government_connections": "...",
   "red_flags": "...",
   "information_gaps": "...",
-  "key_sources": ["url1", "url2", ...]
+  "what_was_found": ["fact 1 (source: url)", "fact 2 (source: url)"],
+  "what_is_unverified": ["claim 1", "claim 2"],
+  "what_reviewer_should_check": ["action 1", "action 2"],
+  "key_sources": ["url1", "url2"]
 }`;
 
+function step4_synthesisReport(app, research, decision) {
+  let articlesText = '';
+  for (let i = 0; i < Math.min(research.results.length, 15); i++) {
+    const a = research.results[i];
+    articlesText += '\n--- Source ' + (i + 1) + ': ' + a.title + ' ---\nURL: ' + a.url + '\n';
+    if (a.highlights && a.highlights.length > 0) articlesText += 'Highlights: ' + a.highlights.slice(0, 3).join(' | ') + '\n';
+    articlesText += (a.text || '').substring(0, 1200) + '\n';
+  }
+  let orgText = '';
+  for (const a of research.orgResults.slice(0, 5)) {
+    orgText += '\n--- ' + a.title + ' ---\nURL: ' + a.url + '\n' + (a.text || '').substring(0, 800) + '\n';
+  }
 
-const VERDICT_PROMPT = `You are a vetting decision-maker for the Oslo Freedom Forum (OFF), hosted by the Human Rights Foundation (HRF).
+  return gpt_(CONFIG.MODEL_SYNTHESIS, SYNTHESIS_PROMPT,
+    `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nComments: ${app.comments}\nLinkedIn: ${research.linkedin || 'not found'}\nTwitter: ${research.twitter || 'not found'}\n\n## Initial Decision: ${decision.verdict} (${Math.round((decision.overall_confidence || 0) * 100)}%)\nReasoning: ${decision.reasoning}\n${decision.flag_reason ? 'Flag reason: ' + decision.flag_reason : ''}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
+    3000);
+}
 
-## Decision Rules
 
-APPROVE if ANY of these are true:
-- Person or organization appears in web results with legitimate context
-- Bitcoin/crypto involvement is a STRONG POSITIVE signal — HRF runs a major Bitcoin freedom program
-- Students, academics, early-career professionals are welcome
-- Organization verified as legitimate NGO/civil society/media/startup
-- Interest statement shows genuine personal knowledge of human rights issues
-- Refugee support, anti-slavery, press freedom, digital rights, financial inclusion work = APPROVE
-- When in doubt between APPROVE and FLAG, lean toward APPROVE if no red flags
+// ============================================================
+// STEP 5: DEEPER RESEARCH (Exa.ai — FLAGGED only)
+// ============================================================
 
-REJECT if:
-- Current employee of government ministry or state security in a Not Free country
-  Not Free: Afghanistan, Belarus, China, Cuba, Egypt, Eritrea, Ethiopia, Iran, Myanmar, North Korea, Russia, Saudi Arabia, Somalia, South Sudan, Sudan, Syria, Tajikistan, Turkmenistan, UAE, Uzbekistan, Venezuela, Yemen
-- Purpose involves promoting government agenda, state propaganda, or surveillance
-- EXCEPTION: documented pro-democracy dissent by a government official → FLAG instead
+function step5_deeperResearch(app, decision, synthesis) {
+  const deepResults = { results: [], searches: [], errors: [] };
 
-FLAG if:
-- Government official from a Partly Free state (needs human review)
-- Cannot verify identity AND affiliations are vague or concerning
-- Conflicting signals
-- Confidence below 70%
+  // Build targeted queries based on what's missing
+  const gaps = (synthesis.information_gaps || '') + ' ' + (synthesis.what_is_unverified || []).join(' ') + ' ' + (decision.flag_reason || '');
 
-Respond with JSON:
+  // Search 4: Targeted search based on flag reason
+  try {
+    const query = app.name + ' ' + (gaps.indexOf('government') !== -1 ? 'government ministry official' :
+      gaps.indexOf('organization') !== -1 || gaps.indexOf('org') !== -1 ? app.org + ' registration funding leadership' :
+      gaps.indexOf('identity') !== -1 ? app.name + ' biography profile' :
+      app.name + ' ' + app.org + ' background');
+    const d = exa_(query, 8);
+    deepResults.searches.push('targeted: ' + query.substring(0, 50));
+    const existingUrls = new Set(); // don't dedup against original — we want fresh perspectives
+    for (const r of (d.results || [])) {
+      deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 2000) });
+    }
+  } catch (e) { deepResults.errors.push('Targeted: ' + e.message); }
+
+  // Search 5: Try alternate name/language search
+  try {
+    const d = exa_('"' + app.name + '"', 5);
+    deepResults.searches.push('exact name');
+    for (const r of (d.results || [])) {
+      deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+    }
+  } catch (e) { deepResults.errors.push('Name: ' + e.message); }
+
+  return deepResults;
+}
+
+
+// ============================================================
+// STEP 6: UPDATED SYNTHESIS (gpt-5 — FLAGGED only)
+// ============================================================
+
+const UPDATED_SYNTHESIS_PROMPT = `You are a senior research analyst updating a vetting report with new information.
+
+You previously flagged this applicant because specific information was missing. A second round of targeted web searches has been conducted. Incorporate the new findings into an updated report.
+
+Focus on:
+- Did the new searches resolve the ambiguity?
+- What new facts were confirmed?
+- What remains unverified even after deeper research?
+- Updated recommendation for the reviewer
+
+Respond JSON:
+{
+  "updated_findings": "What the deeper research revealed",
+  "resolved_gaps": ["gaps that were filled"],
+  "remaining_gaps": ["gaps that still exist"],
+  "updated_what_found": ["all confirmed facts including new ones (cite URLs)"],
+  "updated_what_unverified": ["remaining unverified claims"],
+  "updated_reviewer_actions": ["specific actions for reviewer with new context"],
+  "new_key_sources": ["new urls found"]
+}`;
+
+function step6_updatedSynthesis(app, synthesis, deepResearch, decision) {
+  let newArticles = '';
+  for (let i = 0; i < deepResearch.results.length; i++) {
+    const a = deepResearch.results[i];
+    newArticles += '\n--- New Source ' + (i + 1) + ': ' + a.title + ' ---\nURL: ' + a.url + '\n' + (a.text || '').substring(0, 1200) + '\n';
+  }
+
+  return gpt_(CONFIG.MODEL_SYNTHESIS, UPDATED_SYNTHESIS_PROMPT,
+    `## Applicant: ${app.name} at ${app.org}\n\n## Original Flag Reason\n${decision.flag_reason || decision.reasoning}\n\n## Original Synthesis\nWhat was found: ${JSON.stringify(synthesis.what_was_found)}\nWhat was unverified: ${JSON.stringify(synthesis.what_is_unverified)}\nInfo gaps: ${synthesis.information_gaps}\n\n## NEW Deeper Research (${deepResearch.results.length} results)\n${newArticles || 'No additional results found.'}`,
+    2000);
+}
+
+
+// ============================================================
+// STEP 7: FINAL DECISION (gpt-5 — FLAGGED only)
+// ============================================================
+
+const FINAL_DECISION_PROMPT = `You are a senior vetting decision-maker resolving a flagged case for the Oslo Freedom Forum.
+
+This applicant was flagged in the initial review. Additional targeted research has been conducted. Make a final decision.
+
+Rules (same as initial):
+- Bitcoin/crypto = POSITIVE
+- Govt ministry Not Free country = REJECT (unless documented dissent)
+- Students/early-career with confirmed identity = APPROVE
+- If STILL ambiguous after deeper research = keep FLAGGED with very specific reviewer instructions
+
+Respond JSON:
 {
   "verdict": "APPROVED" or "FLAGGED" or "REJECTED",
-  "confidence_breakdown": {"identity": 0-1, "organization": 0-1, "alignment": 0-1, "risk": 0-1},
-  "overall_confidence": 0.0-1.0,
-  "headline_decision": "One sentence explaining the decision",
-  "verification_scorecard": {"confirmed": [], "not_found": [], "concerning": []},
-  "recommended_next_step": "Specific, actionable instruction for the human reviewer.",
-  "reasoning": "2-4 sentence detailed reasoning"
+  "confidence": 0.0-1.0,
+  "headline_decision": "One sentence final determination",
+  "reasoning": "What changed (or didn't) after deeper research",
+  "reviewer_action": "If still FLAGGED: exact action for human reviewer"
 }`;
 
-
-const DEEP_REVIEW_PROMPT = `You are a senior vetting analyst doing a deep review of a flagged applicant for the Oslo Freedom Forum.
-
-Key rules:
-- Bitcoin/crypto is POSITIVE (HRF Bitcoin program)
-- Government ministry in Not Free country = REJECT (unless documented dissent)
-- Students and early-career professionals should generally be approved if identity checks out
-- If you can't resolve it, keep it FLAGGED with a VERY specific next step
-
-Respond with JSON:
-{"verdict": "APPROVED" or "FLAGGED" or "REJECTED", "confidence": 0.0-1.0, "reasoning": "detailed analysis", "recommended_next_step": "specific action for human reviewer"}`;
-
-
-// ============================================================
-// STAGE 1: SPAM CHECK
-// ============================================================
-
-function stage1SpamCheck_(applicant) {
-  const profileText = `Name: ${applicant.name}
-Title: ${applicant.title}
-Organization: ${applicant.org}
-How heard: ${applicant.howHeard}
-Interest statement: ${applicant.interest}
-Previous attendance: ${applicant.prevAttendance}
-Previous forums: ${applicant.prevForums}
-Additional comments: ${applicant.comments}
-Social media: Twitter=${applicant.twitter}, Instagram=${applicant.instagram}, LinkedIn=${applicant.linkedin}, Facebook=${applicant.facebook}, Other=${applicant.otherSocial}`;
-
-  const raw = openaiChat_(CONFIG.MODEL_SPAM,
-    [{ role: 'system', content: SPAM_PROMPT }, { role: 'user', content: profileText }],
-    300, 0.0);
-  return parseJSON_(raw);
-}
-
-
-// ============================================================
-// STAGE 2a: EXA RESEARCH
-// ============================================================
-
-function stage2aExaResearch_(applicant) {
-  const dossier = {
-    exaResults: [],
-    linkedin: { found: false },
-    twitter: { found: false },
-    instagram: { found: false },
-    facebook: { found: false },
-    orgWebsite: { found: false },
-    personArticles: [],
-    orgArticles: [],
-    searchesRun: [],
-    errors: [],
-  };
-
-  // Search 1: Person + Organization
-  try {
-    const data = exaSearch_(applicant.name + ' ' + applicant.org, 10);
-    dossier.searchesRun.push('person+org');
-    for (const r of (data.results || [])) {
-      const entry = { title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 2000), highlights: r.highlights || [] };
-      dossier.exaResults.push(entry);
-      if (r.url && r.url.indexOf('linkedin.com/in/') !== -1 && !dossier.linkedin.found) {
-        dossier.linkedin = { found: true, url: r.url, summary: (r.text || '').substring(0, 500) };
-      }
-      if (r.url && (r.url.indexOf('twitter.com/') !== -1 || r.url.indexOf('x.com/') !== -1) && !dossier.twitter.found) {
-        dossier.twitter = { found: true, url: r.url };
-      }
-    }
-  } catch (e) { dossier.errors.push('Person search: ' + e.message); }
-
-  // Search 2: Organization verification
-  if (applicant.org && applicant.org.length > 3) {
-    try {
-      const data = exaSearch_(applicant.org + ' organization', 5);
-      dossier.searchesRun.push('org');
-      for (const r of (data.results || [])) {
-        dossier.orgArticles.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
-      }
-    } catch (e) { dossier.errors.push('Org search: ' + e.message); }
-  }
-
-  // Search 3: News/activism mentions
-  try {
-    const data = exaSearch_('"' + applicant.name + '" human rights OR activism', 5);
-    dossier.searchesRun.push('news');
-    const existingUrls = new Set(dossier.exaResults.map(e => e.url));
-    for (const r of (data.results || [])) {
-      if (!existingUrls.has(r.url)) {
-        dossier.exaResults.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
-      }
-    }
-  } catch (e) { dossier.errors.push('News search: ' + e.message); }
-
-  // Check applicant-provided social links
-  if (applicant.linkedin && applicant.linkedin.length > 5) dossier.linkedin = { found: true, url: applicant.linkedin, source: 'provided' };
-  if (applicant.twitter && applicant.twitter.length > 5) dossier.twitter = { found: true, url: applicant.twitter, source: 'provided' };
-  if (applicant.instagram && applicant.instagram.length > 5) dossier.instagram = { found: true, url: applicant.instagram, source: 'provided' };
-  if (applicant.facebook && applicant.facebook.length > 5) dossier.facebook = { found: true, url: applicant.facebook, source: 'provided' };
-
-  return dossier;
-}
-
-
-// ============================================================
-// STAGE 2b: RESEARCH SYNTHESIS
-// ============================================================
-
-function stage2bResearchSynthesis_(applicant, dossier) {
-  let articlesText = '';
-  const results = dossier.exaResults.slice(0, 12);
-  for (let i = 0; i < results.length; i++) {
-    const a = results[i];
-    articlesText += '\n--- Source ' + (i + 1) + ': ' + a.title + ' ---\nURL: ' + a.url + '\nContent: ' + (a.text || '').substring(0, 1200) + '\n';
-  }
-
-  let orgText = '';
-  for (const a of dossier.orgArticles.slice(0, 5)) {
-    orgText += '\n--- Org: ' + a.title + ' ---\nURL: ' + a.url + '\nContent: ' + (a.text || '').substring(0, 800) + '\n';
-  }
-
-  const inputText = `## Application Data
-Name: ${applicant.name}
-Title: ${applicant.title}
-Organization: ${applicant.org}
-Interest: ${applicant.interest}
-Previous attendance: ${applicant.prevAttendance}
-Previous forums: ${applicant.prevForums}
-Comments: ${applicant.comments}
-
-## Social Media Found
-LinkedIn: ${JSON.stringify(dossier.linkedin)}
-Twitter/X: ${JSON.stringify(dossier.twitter)}
-
-## Web Research Results (${dossier.exaResults.length} results)
-${articlesText}
-
-## Organization Research
-${orgText || 'No organization-specific results found.'}`;
-
-  const raw = openaiChat_(CONFIG.MODEL_RESEARCH,
-    [{ role: 'system', content: RESEARCH_PROMPT }, { role: 'user', content: inputText }],
-    3000);
-  return parseJSON_(raw);
-}
-
-
-// ============================================================
-// STAGE 2c: VERDICT
-// ============================================================
-
-function stage2cVerdict_(applicant, profile) {
-  const inputText = `## Applicant
-Name: ${applicant.name}
-Title: ${applicant.title}
-Organization: ${applicant.org}
-
-## Research Profile
-Identity Summary: ${profile.identity_summary || 'N/A'}
-Professional Background: ${profile.professional_background || 'N/A'}
-Organization Verification: ${profile.organization_verification || 'N/A'}
-Public Presence: ${profile.public_presence || 'N/A'}
-Social Media: ${profile.social_media_footprint || 'N/A'}
-Human Rights Alignment: ${profile.human_rights_alignment || 'N/A'}
-Government Connections: ${profile.government_connections || 'N/A'}
-Red Flags: ${profile.red_flags || 'N/A'}
-Information Gaps: ${profile.information_gaps || 'N/A'}
-Key Sources: ${JSON.stringify(profile.key_sources || [])}`;
-
-  const raw = openaiChat_(CONFIG.MODEL_VERDICT,
-    [{ role: 'system', content: VERDICT_PROMPT }, { role: 'user', content: inputText }],
-    2000);
-  return parseJSON_(raw);
-}
-
-
-// ============================================================
-// STAGE 3: DEEP REVIEW
-// ============================================================
-
-function stage3DeepReview_(applicant, profile, verdict) {
-  const inputText = `## Applicant: ${applicant.name} at ${applicant.org}
-
-## Research Profile
-${JSON.stringify(profile)}
-
-## Initial Verdict
-Verdict: ${verdict.verdict}
-Confidence: ${verdict.overall_confidence}
-Reasoning: ${verdict.reasoning}
-Confirmed: ${JSON.stringify((verdict.verification_scorecard || {}).confirmed || [])}
-Not found: ${JSON.stringify((verdict.verification_scorecard || {}).not_found || [])}
-Concerning: ${JSON.stringify((verdict.verification_scorecard || {}).concerning || [])}`;
-
-  const raw = openaiChat_(CONFIG.MODEL_DEEP,
-    [{ role: 'system', content: DEEP_REVIEW_PROMPT }, { role: 'user', content: inputText }],
+function step7_finalDecision(app, synthesis, updatedSynthesis, decision) {
+  return gpt_(CONFIG.MODEL_DEEP_DECISION, FINAL_DECISION_PROMPT,
+    `## Applicant: ${app.name}, ${app.title} at ${app.org}\n\n## Initial Decision: ${decision.verdict} (${Math.round((decision.overall_confidence || 0) * 100)}%)\n${decision.reasoning}\nFlag reason: ${decision.flag_reason || 'N/A'}\n\n## Original Findings\n${JSON.stringify(synthesis.what_was_found)}\n\n## Deeper Research Findings\n${updatedSynthesis.updated_findings || 'No new findings'}\nResolved: ${JSON.stringify(updatedSynthesis.resolved_gaps)}\nRemaining: ${JSON.stringify(updatedSynthesis.remaining_gaps)}`,
     1500);
-  return parseJSON_(raw);
 }
 
 
@@ -558,192 +529,175 @@ Concerning: ${JSON.stringify((verdict.verification_scorecard || {}).concerning |
 // READ APPLICANT FROM ROW
 // ============================================================
 
-function readApplicantFromRow_(sheet, row) {
+function readApp_(sheet, row) {
   return {
     row: row,
-    name: getCellValue_(sheet, row, CONFIG.COL_NAME),
-    title: getCellValue_(sheet, row, CONFIG.COL_TITLE),
-    org: getCellValue_(sheet, row, CONFIG.COL_ORG),
-    howHeard: getCellValue_(sheet, row, CONFIG.COL_HOW_HEARD),
-    interest: getCellValue_(sheet, row, CONFIG.COL_INTEREST),
-    prevAttendance: getCellValue_(sheet, row, CONFIG.COL_PREV_ATTENDANCE),
-    prevForums: getCellValue_(sheet, row, CONFIG.COL_PREV_FORUMS),
-    comments: getCellValue_(sheet, row, CONFIG.COL_COMMENTS),
-    twitter: getCellValue_(sheet, row, CONFIG.COL_TWITTER),
-    instagram: getCellValue_(sheet, row, CONFIG.COL_INSTAGRAM),
-    linkedin: getCellValue_(sheet, row, CONFIG.COL_LINKEDIN),
-    facebook: getCellValue_(sheet, row, CONFIG.COL_FACEBOOK),
-    otherSocial: getCellValue_(sheet, row, CONFIG.COL_OTHER_SOCIAL),
-    hrfTruth: getCellValue_(sheet, row, CONFIG.COL_HRF_TRUTH),
+    name: cell_(sheet, row, CONFIG.COL_NAME),
+    title: cell_(sheet, row, CONFIG.COL_TITLE),
+    org: cell_(sheet, row, CONFIG.COL_ORG),
+    howHeard: cell_(sheet, row, CONFIG.COL_HOW_HEARD),
+    interest: cell_(sheet, row, CONFIG.COL_INTEREST),
+    prevAttendance: cell_(sheet, row, CONFIG.COL_PREV_ATTENDANCE),
+    prevForums: cell_(sheet, row, CONFIG.COL_PREV_FORUMS),
+    comments: cell_(sheet, row, CONFIG.COL_COMMENTS),
+    twitter: cell_(sheet, row, CONFIG.COL_TWITTER),
+    instagram: cell_(sheet, row, CONFIG.COL_INSTAGRAM),
+    linkedin: cell_(sheet, row, CONFIG.COL_LINKEDIN),
+    facebook: cell_(sheet, row, CONFIG.COL_FACEBOOK),
+    otherSocial: cell_(sheet, row, CONFIG.COL_OTHER_SOCIAL),
+    hrfTruth: cell_(sheet, row, CONFIG.COL_HRF_TRUTH),
   };
 }
 
 
 // ============================================================
-// PROCESS ONE APPLICANT (full pipeline)
+// PROCESS ONE APPLICANT (full 7-step pipeline)
 // ============================================================
 
-function processOneApplicant_(sheet, row) {
-  const applicant = readApplicantFromRow_(sheet, row);
-  if (!applicant.name || applicant.name.trim().length === 0) return null;
+function processOne_(sheet, row) {
+  const app = readApp_(sheet, row);
+  if (!app.name || app.name.trim().length === 0) return null;
 
-  const startTime = new Date();
-  setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Processing...');
+  const start = new Date();
+  setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 1: Spam check...');
   SpreadsheetApp.flush();
 
-  let finalVerdict = 'flagged';
-  let finalConfidence = 0;
-  let profile = {};
-  let verdict = {};
-  let dossier = {};
-
   try {
-    // === STAGE 1: Spam Check ===
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Stage 1: Spam check...');
-    SpreadsheetApp.flush();
+    // ── STEP 1: Spam Filter ──
+    const spam = step1_spamFilter(app);
+    setCell_(sheet, row, CONFIG.COL_SPAM_RESULT, spam.verdict + ' (' + Math.round((spam.confidence || 0) * 100) + '%) — ' + spam.reasoning);
 
-    const spam = stage1SpamCheck_(applicant);
-    setCellValue_(sheet, row, CONFIG.COL_STAGE1_VERDICT, (spam.verdict || '').toUpperCase() + ' (' + Math.round((spam.confidence || 0) * 100) + '%)');
-
-    if (spam.verdict === 'SPAM' && spam.confidence >= CONFIG.SPAM_CONFIDENCE_THRESHOLD) {
-      finalVerdict = 'SPAM';
-      finalConfidence = spam.confidence;
-      writeResults_(sheet, row, {
-        verdict: 'SPAM',
-        confidence: spam.confidence,
-        headline: 'Detected as spam: ' + spam.reasoning,
-        reasoning: spam.reasoning,
-        stage1: spam.verdict + ' (' + Math.round(spam.confidence * 100) + '%)',
-      }, startTime);
-      return { verdict: 'SPAM', name: applicant.name };
+    if (spam.verdict === 'SPAM' && spam.confidence >= CONFIG.SPAM_THRESHOLD) {
+      writeOutput_(sheet, row, start, {
+        verdict: 'SPAM', confidence: spam.confidence,
+        headline: 'Spam: ' + spam.reasoning,
+      });
+      return { name: app.name, verdict: 'SPAM' };
     }
 
-    // === STAGE 2a: Exa Research ===
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Stage 2a: Web research...');
+    // ── STEP 2: Web Research ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 2: Web research...');
     SpreadsheetApp.flush();
+    const research = step2_webResearch(app);
 
-    dossier = stage2aExaResearch_(applicant);
-
-    // === STAGE 2b: Research Synthesis ===
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Stage 2b: Analyzing research...');
+    // ── STEP 3: Initial Decision ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 3: Initial decision...');
     SpreadsheetApp.flush();
+    const decision = step3_initialDecision(app, research);
+    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + Math.round((decision.overall_confidence || 0) * 100) + '%) — ' + (decision.headline_decision || ''));
 
-    profile = stage2bResearchSynthesis_(applicant, dossier);
-
-    // === STAGE 2c: Verdict ===
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Stage 2c: Rendering verdict...');
+    // ── STEP 4: Synthesis Report (ALL applicants) ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 4: Building report...');
     SpreadsheetApp.flush();
+    const synthesis = step4_synthesisReport(app, research, decision);
 
-    verdict = stage2cVerdict_(applicant, profile);
+    // Write research profile to sheet
+    writeSynthesis_(sheet, row, synthesis, research);
 
-    const conf = verdict.overall_confidence || 0;
-
-    if ((verdict.verdict === 'APPROVED' || verdict.verdict === 'REJECTED') && conf >= CONFIG.FLAG_THRESHOLD) {
-      // Resolved at Stage 2
-      writeResults_(sheet, row, {
-        verdict: verdict.verdict,
-        confidence: conf,
-        headline: verdict.headline_decision,
-        reasoning: verdict.reasoning,
-        nextStep: verdict.recommended_next_step,
-        confirmed: (verdict.verification_scorecard || {}).confirmed || [],
-        notFound: (verdict.verification_scorecard || {}).not_found || [],
-        concerning: (verdict.verification_scorecard || {}).concerning || [],
-        profile: profile,
-        dossier: dossier,
-        stage1: spam.verdict + ' (' + Math.round(spam.confidence * 100) + '%)',
-        stage3: 'Skipped (resolved at Stage 2)',
-      }, startTime);
-      return { verdict: verdict.verdict, name: applicant.name };
+    // If APPROVED or REJECTED with sufficient confidence → done
+    if ((decision.verdict === 'APPROVED' || decision.verdict === 'REJECTED') && (decision.overall_confidence || 0) >= CONFIG.RESOLVE_THRESHOLD) {
+      writeOutput_(sheet, row, start, {
+        verdict: decision.verdict,
+        confidence: decision.overall_confidence,
+        headline: decision.headline_decision,
+        reasoning: decision.reasoning,
+        whatFound: synthesis.what_was_found,
+        whatMissing: synthesis.what_is_unverified,
+        whatReviewer: synthesis.what_reviewer_should_check,
+      });
+      return { name: app.name, verdict: decision.verdict };
     }
 
-    // === STAGE 3: Deep Review ===
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '⏳ Stage 3: Deep review...');
+    // ── STEP 5: Deeper Research (FLAGGED only) ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 5: Deeper research...');
     SpreadsheetApp.flush();
+    const deepResearch = step5_deeperResearch(app, decision, synthesis);
+    setCell_(sheet, row, CONFIG.COL_DEEP_RESEARCH, deepResearch.results.length + ' new results from ' + deepResearch.searches.join(', '));
 
-    const deep = stage3DeepReview_(applicant, profile, verdict);
+    // ── STEP 6: Updated Synthesis ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 6: Updating report...');
+    SpreadsheetApp.flush();
+    const updatedSynthesis = step6_updatedSynthesis(app, synthesis, deepResearch, decision);
 
-    if ((deep.verdict === 'APPROVED' || deep.verdict === 'REJECTED') && deep.confidence >= CONFIG.DEEP_RESOLVE_THRESHOLD) {
-      finalVerdict = deep.verdict;
-      finalConfidence = deep.confidence;
-    } else {
-      finalVerdict = 'FLAGGED';
-      finalConfidence = deep.confidence || conf;
-    }
+    // ── STEP 7: Final Decision ──
+    setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 7: Final decision...');
+    SpreadsheetApp.flush();
+    const finalDecision = step7_finalDecision(app, synthesis, updatedSynthesis, decision);
+    setCell_(sheet, row, CONFIG.COL_FINAL_DECISION, finalDecision.verdict + ' (' + Math.round((finalDecision.confidence || 0) * 100) + '%) — ' + (finalDecision.headline_decision || ''));
 
-    writeResults_(sheet, row, {
+    // Merge synthesis
+    const mergedFound = [...(synthesis.what_was_found || []), ...(updatedSynthesis.updated_what_found || [])];
+    const mergedMissing = updatedSynthesis.updated_what_unverified || synthesis.what_is_unverified || [];
+    const mergedReviewer = updatedSynthesis.updated_reviewer_actions || synthesis.what_reviewer_should_check || [];
+    const mergedSources = [...(synthesis.key_sources || []), ...(updatedSynthesis.new_key_sources || [])];
+
+    // Update sources with new ones
+    setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, [...new Set(mergedSources)].join('\n'));
+
+    const finalVerdict = (finalDecision.confidence || 0) >= 0.70 && (finalDecision.verdict === 'APPROVED' || finalDecision.verdict === 'REJECTED')
+      ? finalDecision.verdict : 'FLAGGED';
+
+    writeOutput_(sheet, row, start, {
       verdict: finalVerdict,
-      confidence: finalConfidence,
-      headline: verdict.headline_decision,
-      reasoning: verdict.reasoning + '\n\n[Deep Review] ' + deep.reasoning,
-      nextStep: deep.recommended_next_step || verdict.recommended_next_step,
-      confirmed: (verdict.verification_scorecard || {}).confirmed || [],
-      notFound: (verdict.verification_scorecard || {}).not_found || [],
-      concerning: (verdict.verification_scorecard || {}).concerning || [],
-      profile: profile,
-      dossier: dossier,
-      stage1: spam.verdict + ' (' + Math.round(spam.confidence * 100) + '%)',
-      stage3: deep.verdict + ' (' + Math.round((deep.confidence || 0) * 100) + '%): ' + deep.reasoning,
-    }, startTime);
+      confidence: finalDecision.confidence || decision.overall_confidence,
+      headline: finalDecision.headline_decision || decision.headline_decision,
+      reasoning: decision.reasoning + '\n\n[After deeper research] ' + finalDecision.reasoning,
+      whatFound: mergedFound,
+      whatMissing: mergedMissing,
+      whatReviewer: mergedReviewer,
+    });
 
-    return { verdict: finalVerdict, name: applicant.name };
+    return { name: app.name, verdict: finalVerdict };
 
   } catch (e) {
-    setCellValue_(sheet, row, CONFIG.COL_STATUS, '❌ Error');
-    setCellValue_(sheet, row, CONFIG.COL_AI_VERDICT, 'ERROR');
-    setCellValue_(sheet, row, CONFIG.COL_REASONING, e.message);
-    return { verdict: 'ERROR', name: applicant.name, error: e.message };
+    setCell_(sheet, row, CONFIG.COL_STATUS, '❌ Error');
+    setCell_(sheet, row, CONFIG.COL_AI_VERDICT, 'ERROR');
+    setCell_(sheet, row, CONFIG.COL_REASONING, e.message);
+    return { name: app.name, verdict: 'ERROR', error: e.message };
   }
 }
 
 
 // ============================================================
-// WRITE RESULTS TO ROW
+// WRITE HELPERS
 // ============================================================
 
-function writeResults_(sheet, row, data, startTime) {
-  const elapsed = Math.round((new Date() - startTime) / 1000);
+function writeSynthesis_(sheet, row, syn, research) {
+  setCell_(sheet, row, CONFIG.COL_IDENTITY, syn.identity_summary || '');
+  setCell_(sheet, row, CONFIG.COL_PROFESSIONAL, syn.professional_background || '');
+  setCell_(sheet, row, CONFIG.COL_ORG_VERIFICATION, syn.organization_verification || '');
+  setCell_(sheet, row, CONFIG.COL_PUBLIC_PRESENCE, syn.public_presence || '');
+  setCell_(sheet, row, CONFIG.COL_HR_ALIGNMENT, syn.human_rights_alignment || '');
+  setCell_(sheet, row, CONFIG.COL_GOVT_CONNECTIONS, syn.government_connections || '');
+  setCell_(sheet, row, CONFIG.COL_RED_FLAGS, syn.red_flags || '');
+  setCell_(sheet, row, CONFIG.COL_INFO_GAPS, syn.information_gaps || '');
+  setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, (syn.key_sources || []).join('\n'));
+  if (research.linkedin) setCell_(sheet, row, CONFIG.COL_LINKEDIN_URL, research.linkedin);
+  if (research.twitter) setCell_(sheet, row, CONFIG.COL_TWITTER_URL, research.twitter);
+}
 
-  // Verdict with color
-  const verdictCell = sheet.getRange(row, columnLetterToNumber_(CONFIG.COL_AI_VERDICT));
-  verdictCell.setValue(data.verdict);
+function writeOutput_(sheet, row, start, data) {
+  const elapsed = Math.round((new Date() - start) / 1000);
+
+  // Color-coded verdict
+  const vc = sheet.getRange(row, colToNum_(CONFIG.COL_AI_VERDICT));
+  vc.setValue(data.verdict);
   switch ((data.verdict || '').toUpperCase()) {
-    case 'APPROVED': verdictCell.setBackground('#064e3b').setFontColor('#4ade80'); break;
-    case 'FLAGGED': verdictCell.setBackground('#78350f').setFontColor('#fbbf24'); break;
-    case 'REJECTED': verdictCell.setBackground('#7f1d1d').setFontColor('#f87171'); break;
-    case 'SPAM': verdictCell.setBackground('#3b0764').setFontColor('#c084fc'); break;
+    case 'APPROVED': vc.setBackground('#064e3b').setFontColor('#4ade80'); break;
+    case 'FLAGGED':  vc.setBackground('#78350f').setFontColor('#fbbf24'); break;
+    case 'REJECTED': vc.setBackground('#7f1d1d').setFontColor('#f87171'); break;
+    case 'SPAM':     vc.setBackground('#3b0764').setFontColor('#c084fc'); break;
   }
 
-  setCellValue_(sheet, row, CONFIG.COL_STATUS, '✅ Complete');
-  setCellValue_(sheet, row, CONFIG.COL_CONFIDENCE, Math.round((data.confidence || 0) * 100) + '%');
-  setCellValue_(sheet, row, CONFIG.COL_HEADLINE, data.headline || '');
-  setCellValue_(sheet, row, CONFIG.COL_REASONING, data.reasoning || '');
-  setCellValue_(sheet, row, CONFIG.COL_NEXT_STEP, data.nextStep || '');
-  setCellValue_(sheet, row, CONFIG.COL_CONFIRMED, (data.confirmed || []).join('\n'));
-  setCellValue_(sheet, row, CONFIG.COL_NOT_FOUND, (data.notFound || []).join('\n'));
-  setCellValue_(sheet, row, CONFIG.COL_CONCERNING, (data.concerning || []).join('\n'));
-  setCellValue_(sheet, row, CONFIG.COL_STAGE1_VERDICT, data.stage1 || '');
-  setCellValue_(sheet, row, CONFIG.COL_STAGE3_VERDICT, data.stage3 || '');
-  setCellValue_(sheet, row, CONFIG.COL_LATENCY, elapsed + 's');
+  setCell_(sheet, row, CONFIG.COL_STATUS, '✅ Complete');
+  setCell_(sheet, row, CONFIG.COL_CONFIDENCE, Math.round((data.confidence || 0) * 100) + '%');
+  setCell_(sheet, row, CONFIG.COL_HEADLINE, data.headline || '');
+  setCell_(sheet, row, CONFIG.COL_REASONING, data.reasoning || '');
+  setCell_(sheet, row, CONFIG.COL_LATENCY, elapsed + 's');
 
-  // Research profile columns
-  if (data.profile) {
-    setCellValue_(sheet, row, CONFIG.COL_IDENTITY, data.profile.identity_summary || '');
-    setCellValue_(sheet, row, CONFIG.COL_PROFESSIONAL, data.profile.professional_background || '');
-    setCellValue_(sheet, row, CONFIG.COL_ORG_VERIFICATION, data.profile.organization_verification || '');
-    setCellValue_(sheet, row, CONFIG.COL_PUBLIC_PRESENCE, data.profile.public_presence || '');
-    setCellValue_(sheet, row, CONFIG.COL_HR_ALIGNMENT, data.profile.human_rights_alignment || '');
-    setCellValue_(sheet, row, CONFIG.COL_GOVT_CONNECTIONS, data.profile.government_connections || '');
-    setCellValue_(sheet, row, CONFIG.COL_RED_FLAGS, data.profile.red_flags || '');
-    setCellValue_(sheet, row, CONFIG.COL_INFO_GAPS, data.profile.information_gaps || '');
-    setCellValue_(sheet, row, CONFIG.COL_KEY_SOURCES, (data.profile.key_sources || []).join('\n'));
-  }
-
-  // Social links found
-  if (data.dossier) {
-    if (data.dossier.linkedin && data.dossier.linkedin.found) setCellValue_(sheet, row, CONFIG.COL_LINKEDIN_URL, data.dossier.linkedin.url || '');
-    if (data.dossier.twitter && data.dossier.twitter.found) setCellValue_(sheet, row, CONFIG.COL_TWITTER_URL, data.dossier.twitter.url || '');
-  }
+  if (data.whatFound) setCell_(sheet, row, CONFIG.COL_WHAT_FOUND, (Array.isArray(data.whatFound) ? data.whatFound : []).join('\n'));
+  if (data.whatMissing) setCell_(sheet, row, CONFIG.COL_WHAT_MISSING, (Array.isArray(data.whatMissing) ? data.whatMissing : []).join('\n'));
+  if (data.whatReviewer) setCell_(sheet, row, CONFIG.COL_WHAT_REVIEWER_SHOULD, (Array.isArray(data.whatReviewer) ? data.whatReviewer : []).join('\n'));
 
   SpreadsheetApp.flush();
 }
@@ -755,133 +709,81 @@ function writeResults_(sheet, row, data, startTime) {
 
 function runNextBatch() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.INPUT_SHEET);
-  if (!sheet) { SpreadsheetApp.getUi().alert('Sheet "' + CONFIG.INPUT_SHEET + '" not found. Run Setup Output Columns first.'); return; }
+  if (!sheet) { SpreadsheetApp.getUi().alert('Sheet "Applicants" not found. Run Setup first.'); return; }
 
   const lastRow = sheet.getLastRow();
   let processed = 0;
   const results = [];
 
   for (let row = 2; row <= lastRow && processed < CONFIG.BATCH_SIZE; row++) {
-    const status = getCellValue_(sheet, row, CONFIG.COL_STATUS);
-    const name = getCellValue_(sheet, row, CONFIG.COL_NAME);
-
-    // Skip already processed or empty rows
+    const status = cell_(sheet, row, CONFIG.COL_STATUS);
+    const name = cell_(sheet, row, CONFIG.COL_NAME);
     if (!name || name.trim().length === 0) continue;
-    if (status && (status.indexOf('✅') !== -1 || status.indexOf('Complete') !== -1)) continue;
-    if (status && status.indexOf('❌') !== -1) continue; // skip errors too
+    if (status && (status.indexOf('✅') !== -1 || status.indexOf('❌') !== -1)) continue;
 
-    const result = processOneApplicant_(sheet, row);
-    if (result) {
-      results.push(result);
-      processed++;
-    }
+    const r = processOne_(sheet, row);
+    if (r) { results.push(r); processed++; }
   }
 
-  if (processed === 0) {
-    SpreadsheetApp.getUi().alert('✅ All applicants have been processed!');
-  } else {
-    const summary = results.map(r => r.name + ': ' + r.verdict).join('\n');
-    SpreadsheetApp.getUi().alert('Processed ' + processed + ' applicants:\n\n' + summary);
-  }
+  if (processed === 0) SpreadsheetApp.getUi().alert('✅ All applicants processed!');
+  else SpreadsheetApp.getUi().alert('Processed ' + processed + ':\n\n' + results.map(r => r.name + ': ' + r.verdict).join('\n'));
 }
 
 function runAllRemaining() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.INPUT_SHEET);
-  if (!sheet) { SpreadsheetApp.getUi().alert('Sheet "' + CONFIG.INPUT_SHEET + '" not found.'); return; }
+  if (!sheet) return;
 
   const ui = SpreadsheetApp.getUi();
-  const confirm = ui.alert('Run All Remaining',
-    'This will process all unprocessed applicants in batches of ' + CONFIG.BATCH_SIZE +
-    '. Each batch takes ~3-5 minutes.\n\nIt will auto-continue until all are done (using time-based triggers).\n\nProceed?',
-    ui.ButtonSet.YES_NO);
+  const c = ui.alert('Run All', 'Process all remaining applicants in batches of ' + CONFIG.BATCH_SIZE + '?\n\nIt auto-continues until done.', ui.ButtonSet.YES_NO);
+  if (c !== ui.Button.YES) return;
 
-  if (confirm !== ui.Button.YES) return;
-
-  // Process first batch immediately
-  runNextBatchSilent_();
-
-  // Set up trigger for remaining batches
-  const remaining = countRemaining_(sheet);
-  if (remaining > 0) {
-    // Create a trigger to continue processing every 7 minutes
-    ScriptApp.newTrigger('runNextBatchSilent_')
-      .timeBased()
-      .everyMinutes(1) // will be called every ~1 min, but each run takes ~5 min for 3 applicants
-      .create();
-
-    ui.alert('✅ First batch done. Auto-processing ' + remaining + ' remaining applicants.\n\nYou can close this and come back — it will keep running.\n\nUse HRF Vettor > Stop Auto-Processing to halt.');
+  runBatchSilent_();
+  if (countRemaining_(sheet) > 0) {
+    ScriptApp.newTrigger('runBatchSilent_').timeBased().everyMinutes(1).create();
+    ui.alert('✅ First batch done. Auto-processing remaining.\n\nUse HRF Vettor > Stop to halt.');
   } else {
-    ui.alert('✅ All applicants processed!');
+    ui.alert('✅ All done!');
   }
 }
 
-function runNextBatchSilent_() {
+function runBatchSilent_() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.INPUT_SHEET);
   if (!sheet) return;
-
-  const lastRow = sheet.getLastRow();
   let processed = 0;
-
-  for (let row = 2; row <= lastRow && processed < CONFIG.BATCH_SIZE; row++) {
-    const status = getCellValue_(sheet, row, CONFIG.COL_STATUS);
-    const name = getCellValue_(sheet, row, CONFIG.COL_NAME);
-
-    if (!name || name.trim().length === 0) continue;
-    if (status && (status.indexOf('✅') !== -1 || status.indexOf('Complete') !== -1)) continue;
-    if (status && status.indexOf('❌') !== -1) continue;
-
-    processOneApplicant_(sheet, row);
+  for (let row = 2; row <= sheet.getLastRow() && processed < CONFIG.BATCH_SIZE; row++) {
+    const status = cell_(sheet, row, CONFIG.COL_STATUS);
+    const name = cell_(sheet, row, CONFIG.COL_NAME);
+    if (!name || !name.trim()) continue;
+    if (status && (status.indexOf('✅') !== -1 || status.indexOf('❌') !== -1)) continue;
+    processOne_(sheet, row);
     processed++;
   }
-
-  // If nothing left, remove the trigger
-  if (processed === 0 || countRemaining_(sheet) === 0) {
-    stopAutoProcessing();
-  }
+  if (processed === 0 || countRemaining_(sheet) === 0) stopAutoProcessing();
 }
 
 function runSelectedRow() {
   const sheet = SpreadsheetApp.getActiveSheet();
   const row = sheet.getActiveCell().getRow();
-
-  if (row < 2) {
-    SpreadsheetApp.getUi().alert('Select a data row (not the header).');
-    return;
-  }
-
-  const name = getCellValue_(sheet, row, CONFIG.COL_NAME);
-  if (!name) {
-    SpreadsheetApp.getUi().alert('No applicant name found in this row.');
-    return;
-  }
-
-  const result = processOneApplicant_(sheet, row);
-  if (result) {
-    SpreadsheetApp.getUi().alert('Done!\n\n' + result.name + ': ' + result.verdict);
-  }
+  if (row < 2) { SpreadsheetApp.getUi().alert('Select a data row.'); return; }
+  const r = processOne_(sheet, row);
+  if (r) SpreadsheetApp.getUi().alert(r.name + ': ' + r.verdict);
 }
 
 function stopAutoProcessing() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (const trigger of triggers) {
-    if (trigger.getHandlerFunction() === 'runNextBatchSilent_') {
-      ScriptApp.deleteTrigger(trigger);
-    }
+  for (const t of ScriptApp.getProjectTriggers()) {
+    if (t.getHandlerFunction() === 'runBatchSilent_') ScriptApp.deleteTrigger(t);
   }
-  SpreadsheetApp.getUi().alert('⏹️ Auto-processing stopped.');
+  try { SpreadsheetApp.getUi().alert('⏹️ Stopped.'); } catch (e) { /* triggered run, no UI */ }
 }
 
 function countRemaining_(sheet) {
-  const lastRow = sheet.getLastRow();
-  let count = 0;
-  for (let row = 2; row <= lastRow; row++) {
-    const status = getCellValue_(sheet, row, CONFIG.COL_STATUS);
-    const name = getCellValue_(sheet, row, CONFIG.COL_NAME);
-    if (!name || name.trim().length === 0) continue;
-    if (status && (status.indexOf('✅') !== -1 || status.indexOf('❌') !== -1)) continue;
-    count++;
+  let c = 0;
+  for (let row = 2; row <= sheet.getLastRow(); row++) {
+    const s = cell_(sheet, row, CONFIG.COL_STATUS);
+    const n = cell_(sheet, row, CONFIG.COL_NAME);
+    if (n && n.trim() && !(s && (s.indexOf('✅') !== -1 || s.indexOf('❌') !== -1))) c++;
   }
-  return count;
+  return c;
 }
 
 
@@ -892,60 +794,30 @@ function countRemaining_(sheet) {
 function showSummary() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.INPUT_SHEET);
   if (!sheet) return;
-
-  const lastRow = sheet.getLastRow();
   const counts = { APPROVED: 0, FLAGGED: 0, REJECTED: 0, SPAM: 0, ERROR: 0, pending: 0 };
   let matches = 0, total = 0;
 
-  for (let row = 2; row <= lastRow; row++) {
-    const name = getCellValue_(sheet, row, CONFIG.COL_NAME);
+  for (let row = 2; row <= sheet.getLastRow(); row++) {
+    const name = cell_(sheet, row, CONFIG.COL_NAME);
     if (!name) continue;
-
-    const verdict = (getCellValue_(sheet, row, CONFIG.COL_AI_VERDICT) || '').toUpperCase();
-    const truth = (getCellValue_(sheet, row, CONFIG.COL_HRF_TRUTH) || '').toUpperCase();
-
-    if (verdict in counts) {
-      counts[verdict]++;
-      if (truth) {
-        total++;
-        if (verdict === truth || (verdict === 'SPAM' && truth === 'REJECTED')) matches++;
-      }
-    } else {
-      counts.pending++;
-    }
+    const v = (cell_(sheet, row, CONFIG.COL_AI_VERDICT) || '').toUpperCase();
+    const t = (cell_(sheet, row, CONFIG.COL_HRF_TRUTH) || '').toUpperCase();
+    if (v in counts) { counts[v]++; if (t) { total++; if (v === t || (v === 'SPAM' && t === 'REJECTED')) matches++; } }
+    else counts.pending++;
   }
-
-  const accuracy = total > 0 ? Math.round(matches / total * 100) : 'N/A';
 
   SpreadsheetApp.getUi().alert(
-    '📊 Pipeline Summary\n\n' +
-    '✅ Approved: ' + counts.APPROVED + '\n' +
-    '🟡 Flagged: ' + counts.FLAGGED + '\n' +
-    '❌ Rejected: ' + counts.REJECTED + '\n' +
-    '🗑️ Spam: ' + counts.SPAM + '\n' +
-    '⚠️ Errors: ' + counts.ERROR + '\n' +
-    '⏳ Pending: ' + counts.pending + '\n\n' +
-    (total > 0 ? '🎯 Accuracy: ' + accuracy + '% (' + matches + '/' + total + ' vs HRF ground truth)' : 'No ground truth data to compare.')
-  );
+    '📊 Summary\n\n✅ Approved: ' + counts.APPROVED + '\n🟡 Flagged: ' + counts.FLAGGED +
+    '\n❌ Rejected: ' + counts.REJECTED + '\n🗑️ Spam: ' + counts.SPAM +
+    '\n⚠️ Errors: ' + counts.ERROR + '\n⏳ Pending: ' + counts.pending +
+    (total > 0 ? '\n\n🎯 Accuracy: ' + Math.round(matches / total * 100) + '% (' + matches + '/' + total + ')' : ''));
 }
 
 
 // ============================================================
-// UTILITY HELPERS
+// UTILITY
 // ============================================================
 
-function columnLetterToNumber_(letter) {
-  let col = 0;
-  for (let i = 0; i < letter.length; i++) {
-    col = col * 26 + (letter.charCodeAt(i) - 64);
-  }
-  return col;
-}
-
-function getCellValue_(sheet, row, colLetter) {
-  return String(sheet.getRange(row, columnLetterToNumber_(colLetter)).getValue() || '').trim();
-}
-
-function setCellValue_(sheet, row, colLetter, value) {
-  sheet.getRange(row, columnLetterToNumber_(colLetter)).setValue(value);
-}
+function colToNum_(l) { let c = 0; for (let i = 0; i < l.length; i++) c = c * 26 + (l.charCodeAt(i) - 64); return c; }
+function cell_(s, r, c) { return String(s.getRange(r, colToNum_(c)).getValue() || '').trim(); }
+function setCell_(s, r, c, v) { s.getRange(r, colToNum_(c)).setValue(v); }
