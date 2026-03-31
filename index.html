@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HRF OFF Vettor v2</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script>
     tailwind.config = {
       theme: { extend: { colors: {
@@ -41,7 +42,45 @@
         <h1 class="text-2xl font-bold text-white">HRF OFF Vettor v2</h1>
         <p class="text-sm text-gray-400">Oslo Freedom Forum Applicant Vetting Pipeline</p>
       </div>
-      <div id="loading" class="text-sm text-gray-500">Loading...</div>
+      <div class="flex items-center gap-3">
+        <div id="loading" class="text-sm text-gray-500">Loading...</div>
+        <button onclick="openUpload()" class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+          Upload Spreadsheet
+        </button>
+      </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div id="upload-modal" class="fixed inset-0 bg-black/70 z-50 hidden overflow-y-auto">
+      <div class="max-w-lg mx-auto my-20 px-4">
+        <div class="bg-dark-800 rounded-xl p-6 fade-in">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-bold text-white">Upload Applicants</h2>
+            <button onclick="closeUpload()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+          </div>
+          <p class="text-sm text-gray-400 mb-4">Upload an Excel (.xlsx) or CSV file with applicant data. The system will auto-map columns from the standard HRF application format.</p>
+          <div id="upload-dropzone" class="border-2 border-dashed border-gray-600 rounded-xl p-8 text-center hover:border-blue-500 transition cursor-pointer" onclick="document.getElementById('file-input').click()" ondragover="event.preventDefault();this.classList.add('border-blue-500')" ondragleave="this.classList.remove('border-blue-500')" ondrop="handleDrop(event)">
+            <svg class="w-10 h-10 text-gray-500 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            <p class="text-gray-400 text-sm">Drag & drop your file here, or click to browse</p>
+            <p class="text-gray-600 text-xs mt-1">Supports .xlsx and .csv</p>
+          </div>
+          <input type="file" id="file-input" accept=".xlsx,.csv" class="hidden" onchange="handleFile(this.files[0])">
+          <div id="upload-preview" class="hidden mt-4">
+            <div class="bg-dark-700 rounded-lg p-3 mb-3">
+              <div class="flex items-center justify-between">
+                <span id="upload-filename" class="text-sm text-white"></span>
+                <span id="upload-rowcount" class="text-xs text-gray-400"></span>
+              </div>
+              <div id="upload-columns" class="text-xs text-gray-500 mt-1"></div>
+            </div>
+            <button id="upload-btn" onclick="submitUpload()" class="w-full bg-green-600 hover:bg-green-500 text-white font-medium py-2 rounded-lg transition">
+              Upload Applicants
+            </button>
+          </div>
+          <div id="upload-status" class="mt-3 text-sm hidden"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Stats -->
@@ -375,6 +414,91 @@
         console.error(err);
       }
     }
+
+    // --- Upload functionality ---
+    let pendingUploadData = null;
+
+    function openUpload() { document.getElementById('upload-modal').classList.remove('hidden'); }
+    function closeUpload() {
+      document.getElementById('upload-modal').classList.add('hidden');
+      document.getElementById('upload-preview').classList.add('hidden');
+      document.getElementById('upload-status').classList.add('hidden');
+      document.getElementById('file-input').value = '';
+      pendingUploadData = null;
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      e.currentTarget.classList.remove('border-blue-500');
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    }
+
+    function handleFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const wb = XLSX.read(e.target.result, { type: 'array' });
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const data = XLSX.utils.sheet_to_json(sheet);
+
+          pendingUploadData = data;
+          document.getElementById('upload-filename').textContent = file.name;
+          document.getElementById('upload-rowcount').textContent = `${data.length} rows`;
+          const cols = data.length > 0 ? Object.keys(data[0]).slice(0, 6).join(', ') + (Object.keys(data[0]).length > 6 ? '...' : '') : 'No columns';
+          document.getElementById('upload-columns').textContent = `Columns: ${cols}`;
+          document.getElementById('upload-preview').classList.remove('hidden');
+          document.getElementById('upload-status').classList.add('hidden');
+        } catch (err) {
+          showUploadStatus('Error reading file: ' + err.message, 'red');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function showUploadStatus(msg, color = 'gray') {
+      const el = document.getElementById('upload-status');
+      el.classList.remove('hidden');
+      el.className = `mt-3 text-sm text-${color}-400`;
+      el.textContent = msg;
+    }
+
+    async function submitUpload() {
+      if (!pendingUploadData || pendingUploadData.length === 0) return;
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true;
+      btn.textContent = 'Uploading...';
+      btn.classList.replace('bg-green-600', 'bg-gray-600');
+      showUploadStatus(`Uploading ${pendingUploadData.length} applicants...`, 'blue');
+
+      try {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/upload-applicants`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ applicants: pendingUploadData })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showUploadStatus(`Successfully imported ${result.inserted} applicants!`, 'green');
+          btn.textContent = 'Done!';
+          setTimeout(() => { closeUpload(); init(); }, 1500);
+        } else {
+          showUploadStatus(`Error: ${result.error}`, 'red');
+          btn.disabled = false;
+          btn.textContent = 'Upload Applicants';
+          btn.classList.replace('bg-gray-600', 'bg-green-600');
+        }
+      } catch (err) {
+        showUploadStatus('Network error: ' + err.message, 'red');
+        btn.disabled = false;
+        btn.textContent = 'Upload Applicants';
+        btn.classList.replace('bg-gray-600', 'bg-green-600');
+      }
+    }
+
+    document.getElementById('upload-modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('upload-modal')) closeUpload();
+    });
 
     init();
     // Auto-refresh every 30s
