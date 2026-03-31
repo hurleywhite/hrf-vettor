@@ -23,47 +23,47 @@ const CONFIG = {
   INPUT_SHEET: 'Applicants',
 
   // Input columns (letters) — these match the original spreadsheet
+  // NOTE: No email column — removed for privacy
   COL_NAME: 'A',
-  COL_EMAIL: 'B',
-  COL_TITLE: 'C',
-  COL_ORG: 'D',
-  COL_HOW_HEARD: 'E',
-  COL_INTEREST: 'F',
-  COL_PREV_ATTENDANCE: 'G',
-  COL_PREV_FORUMS: 'H',
-  COL_COMMENTS: 'I',
-  COL_TWITTER: 'J',
-  COL_INSTAGRAM: 'K',
-  COL_LINKEDIN: 'L',
-  COL_FACEBOOK: 'M',
-  COL_OTHER_SOCIAL: 'N',
+  COL_TITLE: 'B',
+  COL_ORG: 'C',
+  COL_HOW_HEARD: 'D',
+  COL_INTEREST: 'E',
+  COL_PREV_ATTENDANCE: 'F',
+  COL_PREV_FORUMS: 'G',
+  COL_COMMENTS: 'H',
+  COL_TWITTER: 'I',
+  COL_INSTAGRAM: 'J',
+  COL_LINKEDIN: 'K',
+  COL_FACEBOOK: 'L',
+  COL_OTHER_SOCIAL: 'M',
 
   // Output columns (start after input)
-  COL_STATUS: 'P',           // Processing status
-  COL_AI_VERDICT: 'Q',       // Final AI verdict
-  COL_CONFIDENCE: 'R',       // Overall confidence
-  COL_HEADLINE: 'S',         // One-line decision headline
-  COL_REASONING: 'T',        // Detailed reasoning
-  COL_NEXT_STEP: 'U',        // Recommended next step
-  COL_CONFIRMED: 'V',        // Scorecard: confirmed facts
-  COL_NOT_FOUND: 'W',        // Scorecard: not found
-  COL_CONCERNING: 'X',       // Scorecard: concerning
-  COL_IDENTITY: 'Y',         // Identity summary from research
-  COL_PROFESSIONAL: 'Z',     // Professional background
-  COL_ORG_VERIFICATION: 'AA',// Organization verification
-  COL_PUBLIC_PRESENCE: 'AB', // Public presence
-  COL_HR_ALIGNMENT: 'AC',    // Human rights alignment
-  COL_GOVT_CONNECTIONS: 'AD',// Government connections
-  COL_RED_FLAGS: 'AE',       // Red flags
-  COL_INFO_GAPS: 'AF',       // Information gaps
-  COL_LINKEDIN_URL: 'AG',    // LinkedIn URL found
-  COL_TWITTER_URL: 'AH',     // Twitter URL found
-  COL_KEY_SOURCES: 'AI',     // Key source URLs
-  COL_STAGE1_VERDICT: 'AJ',  // Stage 1 result
-  COL_STAGE3_VERDICT: 'AK',  // Stage 3 result (if run)
-  COL_LATENCY: 'AL',         // Total processing time
-  COL_REVIEWER_NOTE: 'AM',   // Human reviewer notes
-  COL_HRF_TRUTH: 'O',        // HRF ground truth (for testing)
+  COL_HRF_TRUTH: 'N',        // HRF ground truth (for testing)
+  COL_STATUS: 'O',           // Processing status
+  COL_AI_VERDICT: 'P',       // Final AI verdict
+  COL_CONFIDENCE: 'Q',       // Overall confidence
+  COL_HEADLINE: 'R',         // One-line decision headline
+  COL_REASONING: 'S',        // Detailed reasoning
+  COL_NEXT_STEP: 'T',        // Recommended next step
+  COL_CONFIRMED: 'U',        // Scorecard: confirmed facts
+  COL_NOT_FOUND: 'V',        // Scorecard: not found
+  COL_CONCERNING: 'W',       // Scorecard: concerning
+  COL_IDENTITY: 'X',         // Identity summary from research
+  COL_PROFESSIONAL: 'Y',     // Professional background
+  COL_ORG_VERIFICATION: 'Z', // Organization verification
+  COL_PUBLIC_PRESENCE: 'AA',  // Public presence
+  COL_HR_ALIGNMENT: 'AB',    // Human rights alignment
+  COL_GOVT_CONNECTIONS: 'AC', // Government connections
+  COL_RED_FLAGS: 'AD',       // Red flags
+  COL_INFO_GAPS: 'AE',       // Information gaps
+  COL_LINKEDIN_URL: 'AF',    // LinkedIn URL found
+  COL_TWITTER_URL: 'AG',     // Twitter URL found
+  COL_KEY_SOURCES: 'AH',     // Key source URLs
+  COL_STAGE1_VERDICT: 'AI',  // Stage 1 result
+  COL_STAGE3_VERDICT: 'AJ',  // Stage 3 result (if run)
+  COL_LATENCY: 'AK',         // Total processing time
+  COL_REVIEWER_NOTE: 'AL',   // Human reviewer notes
 
   // Models
   MODEL_SPAM: 'gpt-4o-mini',
@@ -270,7 +270,6 @@ SPAM signals (any ONE is sufficient to mark as spam):
 - Interest statement contains URLs or promotional/commercial language unrelated to human rights
 - AI-generated boilerplate that is clearly mass-submitted
 - Claims previous attendance = "Yes" but lists no specific forum names
-- Email from known disposable service (tempmail, mailinator, guerrillamail, etc.)
 - Mojibake / garbled encoding in interest statement
 - Interest statement is fewer than 10 words or a single repeated phrase
 
@@ -375,7 +374,6 @@ Respond with JSON:
 
 function stage1SpamCheck_(applicant) {
   const profileText = `Name: ${applicant.name}
-Email: ${applicant.email}
 Title: ${applicant.title}
 Organization: ${applicant.org}
 How heard: ${applicant.howHeard}
@@ -478,7 +476,6 @@ function stage2bResearchSynthesis_(applicant, dossier) {
 
   const inputText = `## Application Data
 Name: ${applicant.name}
-Email: ${applicant.email}
 Title: ${applicant.title}
 Organization: ${applicant.org}
 Interest: ${applicant.interest}
@@ -565,7 +562,6 @@ function readApplicantFromRow_(sheet, row) {
   return {
     row: row,
     name: getCellValue_(sheet, row, CONFIG.COL_NAME),
-    email: getCellValue_(sheet, row, CONFIG.COL_EMAIL),
     title: getCellValue_(sheet, row, CONFIG.COL_TITLE),
     org: getCellValue_(sheet, row, CONFIG.COL_ORG),
     howHeard: getCellValue_(sheet, row, CONFIG.COL_HOW_HEARD),
