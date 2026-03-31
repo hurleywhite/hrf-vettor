@@ -26,48 +26,36 @@
 const CONFIG = {
   INPUT_SHEET: 'Applicants',
 
-  // Input columns (A-M) — no email
-  COL_NAME: 'A',
-  COL_TITLE: 'B',
-  COL_ORG: 'C',
-  COL_HOW_HEARD: 'D',
-  COL_INTEREST: 'E',
-  COL_PREV_ATTENDANCE: 'F',
-  COL_PREV_FORUMS: 'G',
-  COL_COMMENTS: 'H',
-  COL_TWITTER: 'I',
-  COL_INSTAGRAM: 'J',
-  COL_LINKEDIN: 'K',
-  COL_FACEBOOK: 'L',
-  COL_OTHER_SOCIAL: 'M',
+  // Input column — entire profile in one cell
+  COL_PROFILE: 'P',             // Full profile text block
 
-  // Output columns
-  COL_HRF_TRUTH: 'N',           // Ground truth (testing only)
-  COL_STATUS: 'O',              // Processing status
-  COL_AI_VERDICT: 'P',          // Final verdict
-  COL_CONFIDENCE: 'Q',          // Confidence %
-  COL_HEADLINE: 'R',            // One-line headline decision
-  COL_WHAT_FOUND: 'S',          // Synthesis: what was found
-  COL_WHAT_MISSING: 'T',        // Synthesis: what's still unverified
-  COL_WHAT_REVIEWER_SHOULD: 'U',// Synthesis: what reviewer should check
-  COL_REASONING: 'V',           // Full reasoning
-  COL_IDENTITY: 'W',            // Identity summary
-  COL_PROFESSIONAL: 'X',        // Professional background
-  COL_ORG_VERIFICATION: 'Y',    // Org verification
-  COL_PUBLIC_PRESENCE: 'Z',     // Public presence
-  COL_HR_ALIGNMENT: 'AA',       // Human rights alignment
-  COL_GOVT_CONNECTIONS: 'AB',   // Government connections
-  COL_RED_FLAGS: 'AC',          // Red flags
-  COL_INFO_GAPS: 'AD',          // Information gaps
-  COL_LINKEDIN_URL: 'AE',       // LinkedIn found
-  COL_TWITTER_URL: 'AF',        // Twitter found
-  COL_KEY_SOURCES: 'AG',        // Source URLs
-  COL_SPAM_RESULT: 'AH',        // Step 1 result
-  COL_INITIAL_DECISION: 'AI',   // Step 3 result
-  COL_DEEP_RESEARCH: 'AJ',      // Step 5 result (if flagged)
-  COL_FINAL_DECISION: 'AK',     // Step 7 result (if flagged)
-  COL_LATENCY: 'AL',            // Processing time
-  COL_REVIEWER_NOTE: 'AM',      // Human reviewer notes
+  // Output columns — start at S
+  COL_HRF_TRUTH: 'Q',           // Ground truth (testing only)
+  COL_STATUS: 'R',              // Processing status
+  COL_AI_VERDICT: 'S',          // Final verdict
+  COL_CONFIDENCE: 'T',          // Confidence %
+  COL_HEADLINE: 'U',            // One-line headline decision
+  COL_WHAT_FOUND: 'V',          // Synthesis: what was confirmed
+  COL_WHAT_MISSING: 'W',        // Next steps to complete vetting
+  COL_WHAT_REVIEWER_SHOULD: 'X',// Reviewer action items
+  COL_REASONING: 'Y',           // Full reasoning
+  COL_IDENTITY: 'Z',            // Identity summary
+  COL_PROFESSIONAL: 'AA',       // Professional background
+  COL_ORG_VERIFICATION: 'AB',   // Org verification
+  COL_PUBLIC_PRESENCE: 'AC',    // Public presence
+  COL_HR_ALIGNMENT: 'AD',       // Human rights alignment
+  COL_GOVT_CONNECTIONS: 'AE',   // Government connections
+  COL_RED_FLAGS: 'AF',          // Red flags
+  COL_INFO_GAPS: 'AG',          // Next steps (narrative)
+  COL_LINKEDIN_URL: 'AH',       // LinkedIn found
+  COL_TWITTER_URL: 'AI',        // Twitter found
+  COL_KEY_SOURCES: 'AJ',        // Source URLs
+  COL_SPAM_RESULT: 'AK',        // Step 1 result
+  COL_INITIAL_DECISION: 'AL',   // Step 3 result
+  COL_DEEP_RESEARCH: 'AM',      // Step 5 result (if flagged)
+  COL_FINAL_DECISION: 'AN',     // Step 7 result (if flagged)
+  COL_LATENCY: 'AO',            // Processing time
+  COL_REVIEWER_NOTE: 'AP',      // Human reviewer notes
 
   // Models
   MODEL_SPAM: 'gpt-4o-mini',
@@ -106,6 +94,7 @@ function setupOutputColumns() {
   if (!sheet) { sheet = ss.getActiveSheet(); sheet.setName(CONFIG.INPUT_SHEET); }
 
   const headers = {
+    [CONFIG.COL_PROFILE]: 'Profile',
     [CONFIG.COL_HRF_TRUTH]: 'HRF Ground Truth',
     [CONFIG.COL_STATUS]: 'Status',
     [CONFIG.COL_AI_VERDICT]: 'AI Verdict',
@@ -620,23 +609,64 @@ function step7_finalDecision(app, synthesis, updatedSynthesis, decision) {
 // ============================================================
 
 function readApp_(sheet, row) {
-  return {
-    row: row,
-    name: cell_(sheet, row, CONFIG.COL_NAME),
-    title: cell_(sheet, row, CONFIG.COL_TITLE),
-    org: cell_(sheet, row, CONFIG.COL_ORG),
-    howHeard: cell_(sheet, row, CONFIG.COL_HOW_HEARD),
-    interest: cell_(sheet, row, CONFIG.COL_INTEREST),
-    prevAttendance: cell_(sheet, row, CONFIG.COL_PREV_ATTENDANCE),
-    prevForums: cell_(sheet, row, CONFIG.COL_PREV_FORUMS),
-    comments: cell_(sheet, row, CONFIG.COL_COMMENTS),
-    twitter: cell_(sheet, row, CONFIG.COL_TWITTER),
-    instagram: cell_(sheet, row, CONFIG.COL_INSTAGRAM),
-    linkedin: cell_(sheet, row, CONFIG.COL_LINKEDIN),
-    facebook: cell_(sheet, row, CONFIG.COL_FACEBOOK),
-    otherSocial: cell_(sheet, row, CONFIG.COL_OTHER_SOCIAL),
-    hrfTruth: cell_(sheet, row, CONFIG.COL_HRF_TRUTH),
+  const raw = cell_(sheet, row, CONFIG.COL_PROFILE);
+  if (!raw || raw.trim().length === 0) return null;
+
+  // Parse "Key:Value" pairs from the profile text block
+  const app = { row: row, name: '', title: '', org: '', howHeard: '', interest: '', prevAttendance: '', prevForums: '', comments: '', twitter: '', instagram: '', linkedin: '', facebook: '', otherSocial: '', hrfTruth: cell_(sheet, row, CONFIG.COL_HRF_TRUTH) };
+
+  const fieldMap = {
+    'First and Last Name': 'name',
+    'Your Position/Title': 'title',
+    'Organizational Affiliation': 'org',
+    'How did you hear about the Oslo Freedom Forum?': 'howHeard',
+    "Please provide a short description on why you're interested in attending the Oslo Freedom Forum.": 'interest',
+    'Have you attended the Oslo Freedom Forum before?': 'prevAttendance',
+    'Please state which Forum (year and location for satellite events) you have attended.': 'prevForums',
+    'Additional comments': 'comments',
+    'X(Formerly Twitter)': 'twitter',
+    'Instagram': 'instagram',
+    'LinkedIn': 'linkedin',
+    'Facebook': 'facebook',
+    'Other': 'otherSocial',
   };
+
+  // Split by known field labels and extract values
+  // Strategy: find each label followed by ":" and capture everything until the next label
+  const labels = Object.keys(fieldMap);
+
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    const searchKey = label + ':';
+    const idx = raw.indexOf(searchKey);
+    if (idx === -1) continue;
+
+    const valueStart = idx + searchKey.length;
+
+    // Find where the next field starts
+    let valueEnd = raw.length;
+    for (let j = 0; j < labels.length; j++) {
+      if (j === i) continue;
+      const nextIdx = raw.indexOf('\n' + labels[j] + ':', valueStart);
+      if (nextIdx !== -1 && nextIdx < valueEnd) valueEnd = nextIdx;
+    }
+
+    const value = raw.substring(valueStart, valueEnd).trim();
+    const field = fieldMap[label];
+    if (field) app[field] = value;
+  }
+
+  // Also extract URLs from the full text (people paste URLs in comments, interest, etc.)
+  const urlRegex = /https?:\/\/[^\s\]\)\"<>]+/g;
+  const allUrls = (raw.match(urlRegex) || []);
+  for (const url of allUrls) {
+    if (url.indexOf('linkedin.com') !== -1 && !app.linkedin) app.linkedin = url;
+    if ((url.indexOf('twitter.com') !== -1 || url.indexOf('x.com/') !== -1) && !app.twitter) app.twitter = url;
+    if (url.indexOf('instagram.com') !== -1 && !app.instagram) app.instagram = url;
+    if (url.indexOf('facebook.com') !== -1 && !app.facebook) app.facebook = url;
+  }
+
+  return app;
 }
 
 
@@ -646,7 +676,7 @@ function readApp_(sheet, row) {
 
 function processOne_(sheet, row) {
   const app = readApp_(sheet, row);
-  if (!app.name || app.name.trim().length === 0) return null;
+  if (!app || !app.name || app.name.trim().length === 0) return null;
 
   const start = new Date();
   setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 1: Spam check...');
@@ -829,8 +859,8 @@ function runNextBatch() {
 
   for (let row = 2; row <= lastRow && processed < CONFIG.BATCH_SIZE; row++) {
     const status = cell_(sheet, row, CONFIG.COL_STATUS);
-    const name = cell_(sheet, row, CONFIG.COL_NAME);
-    if (!name || name.trim().length === 0) continue;
+    const profile = cell_(sheet, row, CONFIG.COL_PROFILE);
+    if (!profile || profile.trim().length === 0) continue;
     if (status && (status.indexOf('✅') !== -1 || status.indexOf('❌') !== -1)) continue;
 
     const r = processOne_(sheet, row);
@@ -864,8 +894,8 @@ function runBatchSilent_() {
   let processed = 0;
   for (let row = 2; row <= sheet.getLastRow() && processed < CONFIG.BATCH_SIZE; row++) {
     const status = cell_(sheet, row, CONFIG.COL_STATUS);
-    const name = cell_(sheet, row, CONFIG.COL_NAME);
-    if (!name || !name.trim()) continue;
+    const prof = cell_(sheet, row, CONFIG.COL_PROFILE);
+    if (!prof || !prof.trim()) continue;
     if (status && (status.indexOf('✅') !== -1 || status.indexOf('❌') !== -1)) continue;
     processOne_(sheet, row);
     processed++;
@@ -892,8 +922,8 @@ function countRemaining_(sheet) {
   let c = 0;
   for (let row = 2; row <= sheet.getLastRow(); row++) {
     const s = cell_(sheet, row, CONFIG.COL_STATUS);
-    const n = cell_(sheet, row, CONFIG.COL_NAME);
-    if (n && n.trim() && !(s && (s.indexOf('✅') !== -1 || s.indexOf('❌') !== -1))) c++;
+    const p = cell_(sheet, row, CONFIG.COL_PROFILE);
+    if (p && p.trim() && !(s && (s.indexOf('✅') !== -1 || s.indexOf('❌') !== -1))) c++;
   }
   return c;
 }
@@ -910,8 +940,8 @@ function showSummary() {
   let matches = 0, total = 0;
 
   for (let row = 2; row <= sheet.getLastRow(); row++) {
-    const name = cell_(sheet, row, CONFIG.COL_NAME);
-    if (!name) continue;
+    const profile = cell_(sheet, row, CONFIG.COL_PROFILE);
+    if (!profile) continue;
     const v = (cell_(sheet, row, CONFIG.COL_AI_VERDICT) || '').toUpperCase();
     const t = (cell_(sheet, row, CONFIG.COL_HRF_TRUTH) || '').toUpperCase();
     if (v in counts) { counts[v]++; if (t) { total++; if (v === t || (v === 'SPAM' && t === 'REJECTED')) matches++; } }
