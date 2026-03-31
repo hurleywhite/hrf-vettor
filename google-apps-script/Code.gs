@@ -111,9 +111,9 @@ function setupOutputColumns() {
     [CONFIG.COL_AI_VERDICT]: 'AI Verdict',
     [CONFIG.COL_CONFIDENCE]: 'Confidence',
     [CONFIG.COL_HEADLINE]: 'Headline Decision',
-    [CONFIG.COL_WHAT_FOUND]: 'What Was Found',
-    [CONFIG.COL_WHAT_MISSING]: 'What Is Still Unverified',
-    [CONFIG.COL_WHAT_REVIEWER_SHOULD]: 'What Reviewer Should Check',
+    [CONFIG.COL_WHAT_FOUND]: 'What Was Confirmed',
+    [CONFIG.COL_WHAT_MISSING]: 'Next Steps to Complete Vetting',
+    [CONFIG.COL_WHAT_REVIEWER_SHOULD]: 'Reviewer Action Items',
     [CONFIG.COL_REASONING]: 'Full Reasoning',
     [CONFIG.COL_IDENTITY]: 'Identity Summary',
     [CONFIG.COL_PROFESSIONAL]: 'Professional Background',
@@ -122,7 +122,7 @@ function setupOutputColumns() {
     [CONFIG.COL_HR_ALIGNMENT]: 'Human Rights Alignment',
     [CONFIG.COL_GOVT_CONNECTIONS]: 'Government Connections',
     [CONFIG.COL_RED_FLAGS]: 'Red Flags',
-    [CONFIG.COL_INFO_GAPS]: 'Information Gaps',
+    [CONFIG.COL_INFO_GAPS]: 'Next Steps (Narrative)',
     [CONFIG.COL_LINKEDIN_URL]: 'LinkedIn URL',
     [CONFIG.COL_TWITTER_URL]: 'Twitter/X URL',
     [CONFIG.COL_KEY_SOURCES]: 'Key Sources',
@@ -225,6 +225,35 @@ function exa_(query, numResults) {
   return JSON.parse(r.getContentText());
 }
 
+function exaGetContents_(urls) {
+  /** Exa "get contents" — fetches full text from specific URLs. */
+  if (!urls || urls.length === 0) return [];
+  // Filter to valid http URLs only
+  const validUrls = urls.filter(u => u && (u.startsWith('http://') || u.startsWith('https://')));
+  if (validUrls.length === 0) return [];
+
+  try {
+    const r = UrlFetchApp.fetch('https://api.exa.ai/contents', {
+      method: 'post',
+      headers: { 'x-api-key': getKey_('EXA_API_KEY'), 'Content-Type': 'application/json' },
+      payload: JSON.stringify({
+        ids: validUrls,
+        text: { maxCharacters: 4000 },
+      }),
+      muteHttpExceptions: true,
+    });
+
+    if (r.getResponseCode() !== 200) return []; // fail silently — URL fetch is bonus
+    const data = JSON.parse(r.getContentText());
+    return (data.results || []).map(r => ({
+      url: r.url || '',
+      title: r.title || '',
+      text: (r.text || '').substring(0, 3000),
+      source: 'direct_fetch',
+    }));
+  } catch (e) { return []; }
+}
+
 
 // ============================================================
 // STEP 1: SPAM FILTER (gpt-4o-mini)
@@ -302,6 +331,31 @@ function step2_webResearch(app) {
   if (app.linkedin && app.linkedin.length > 5 && !research.linkedin) research.linkedin = app.linkedin;
   if (app.twitter && app.twitter.length > 5 && !research.twitter) research.twitter = app.twitter;
 
+  // === AUTONOMOUS DEEP-DIVE: Fetch content from all provided/found URLs ===
+  const urlsToFetch = [];
+  if (research.linkedin) urlsToFetch.push(research.linkedin);
+  if (research.twitter) urlsToFetch.push(research.twitter);
+  if (app.instagram && app.instagram.length > 5) urlsToFetch.push(app.instagram);
+  if (app.facebook && app.facebook.length > 5) urlsToFetch.push(app.facebook);
+  if (app.otherSocial && app.otherSocial.length > 5) urlsToFetch.push(app.otherSocial);
+  // Also fetch org website if found in results
+  for (const r of research.orgResults.slice(0, 2)) {
+    if (r.url && r.url.indexOf('linkedin.com') === -1 && r.url.indexOf('facebook.com') === -1) {
+      urlsToFetch.push(r.url);
+      break;
+    }
+  }
+
+  if (urlsToFetch.length > 0) {
+    try {
+      const fetched = exaGetContents_(urlsToFetch);
+      research.searches.push('direct_fetch (' + fetched.length + ' URLs)');
+      for (const f of fetched) {
+        research.results.push({ title: f.title, url: f.url, text: f.text, highlights: [], source: 'direct_fetch' });
+      }
+    } catch (e) { research.errors.push('URL fetch: ' + e.message); }
+  }
+
   return research;
 }
 
@@ -364,26 +418,30 @@ function step3_initialDecision(app, research) {
 // STEP 4: SYNTHESIS REPORT (gpt-5 — runs for ALL applicants)
 // ============================================================
 
-const SYNTHESIS_PROMPT = `You are a research analyst writing a vetting report for the Oslo Freedom Forum team.
+const SYNTHESIS_PROMPT = `You are a research analyst writing an actionable vetting report for the Oslo Freedom Forum team.
 
-You have an applicant's data, web research, and an initial AI decision. Write a structured report that a human reviewer can use.
+You have an applicant's data, web research (including content fetched directly from their social profiles and org websites), and an initial AI decision. Write a report that tells reviewers exactly what was confirmed and exactly what to do next.
+
+IMPORTANT FRAMING RULES:
+- NEVER say "I couldn't find X" or "no information was found." Instead, always frame as a next step: "NEXT STEP: Verify X by checking Y"
+- Every unverified claim must become a specific action item with a method to verify it
+- Lead with what WAS confirmed, not what wasn't
 
 Your report MUST include:
-1. **Identity Summary**: Who is this person based on what was found?
-2. **Professional Background**: Roles, education, expertise — cite URLs
-3. **Organization Verification**: Is the org real? What does it do? Is this person affiliated?
-4. **Public Presence**: Articles, media, conferences — cite URLs
-5. **Human Rights Alignment**: Evidence of HR work, activism, journalism, Bitcoin/freedom tech
-6. **Government Connections**: Any govt ties? Which country? Freedom House status?
-7. **Red Flags**: Inconsistencies, propaganda links, authoritarian connections
-8. **Information Gaps**: What could NOT be found
+1. **Identity Summary**: Who is this person? Lead with confirmed facts.
+2. **Professional Background**: Confirmed roles, education, expertise — cite URLs. If unverified, give a next step.
+3. **Organization Verification**: What was confirmed about the org. If unverified: "NEXT STEP: Check [specific registry/database] for [org name]"
+4. **Public Presence**: Confirmed articles, media, conferences — cite URLs.
+5. **Human Rights Alignment**: Confirmed evidence of HR work, activism, journalism, Bitcoin/freedom tech.
+6. **Government Connections**: Any confirmed govt ties. If ambiguous: "NEXT STEP: Search [country] government directory for [name]"
+7. **Red Flags**: Only confirmed concerns with evidence. Speculation goes in next steps.
+8. **Next Steps to Complete Vetting**: NOT gaps — specific actions. Each must have a method.
 
-Then provide three synthesis fields:
-- **what_was_found**: Bullet list of confirmed facts with source URLs
-- **what_is_unverified**: Bullet list of claims that couldn't be verified
-- **what_reviewer_should_check**: Specific actions for the human reviewer (e.g., "Check LinkedIn profile at [url] to confirm current role")
+Then provide three structured output fields:
 
-Cite URLs for every factual claim. If nothing found, say so.
+- **what_was_found**: Array of objects, each with a confirmed fact and its source
+- **next_steps**: Array of structured action items (NOT vague gaps — each must say WHAT to do, WHERE to do it, and WHY)
+- **key_sources**: URLs
 
 Respond JSON:
 {
@@ -394,10 +452,16 @@ Respond JSON:
   "human_rights_alignment": "...",
   "government_connections": "...",
   "red_flags": "...",
-  "information_gaps": "...",
-  "what_was_found": ["fact 1 (source: url)", "fact 2 (source: url)"],
-  "what_is_unverified": ["claim 1", "claim 2"],
-  "what_reviewer_should_check": ["action 1", "action 2"],
+  "next_steps_to_complete": "...",
+  "what_was_found": [
+    {"fact": "Confirmed as Director at XYZ Foundation", "source": "https://..."},
+    {"fact": "Published article on digital rights in 2024", "source": "https://..."}
+  ],
+  "next_steps": [
+    {"action": "Verify current role", "method": "Check LinkedIn profile", "url": "https://linkedin.com/in/...", "priority": "high"},
+    {"action": "Confirm org legitimacy", "method": "Search NGO registry for registration", "url": "https://...", "priority": "medium"},
+    {"action": "Check for government affiliations", "method": "Search country civil service directory", "url": "", "priority": "low"}
+  ],
   "key_sources": ["url1", "url2"]
 }`;
 
@@ -427,31 +491,58 @@ function step4_synthesisReport(app, research, decision) {
 function step5_deeperResearch(app, decision, synthesis) {
   const deepResults = { results: [], searches: [], errors: [] };
 
-  // Build targeted queries based on what's missing
-  const gaps = (synthesis.information_gaps || '') + ' ' + (synthesis.what_is_unverified || []).join(' ') + ' ' + (decision.flag_reason || '');
+  // Parse next_steps to understand what's needed
+  const nextSteps = synthesis.next_steps || [];
+  const nextStepsText = nextSteps.map(s => (s.action || '') + ' ' + (s.method || '')).join(' ');
+  const flagReason = decision.flag_reason || decision.reasoning || '';
 
-  // Search 4: Targeted search based on flag reason
+  // Search 4: Targeted based on flag reason
   try {
-    const query = app.name + ' ' + (gaps.indexOf('government') !== -1 ? 'government ministry official' :
-      gaps.indexOf('organization') !== -1 || gaps.indexOf('org') !== -1 ? app.org + ' registration funding leadership' :
-      gaps.indexOf('identity') !== -1 ? app.name + ' biography profile' :
-      app.name + ' ' + app.org + ' background');
+    const query = flagReason.indexOf('government') !== -1 ? app.name + ' government ministry official state' :
+      flagReason.indexOf('organization') !== -1 || flagReason.indexOf('org') !== -1 ? app.org + ' NGO registration founded leadership funding' :
+      flagReason.indexOf('identity') !== -1 ? app.name + ' biography profile interview' :
+      app.name + ' ' + app.org + ' background role';
     const d = exa_(query, 8);
-    deepResults.searches.push('targeted: ' + query.substring(0, 50));
-    const existingUrls = new Set(); // don't dedup against original — we want fresh perspectives
-    for (const r of (d.results || [])) {
-      deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 2000) });
-    }
+    deepResults.searches.push('flag-targeted');
+    for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 2000) });
   } catch (e) { deepResults.errors.push('Targeted: ' + e.message); }
 
-  // Search 5: Try alternate name/language search
+  // Search 5: Exact name in quotes (catches non-English press)
   try {
     const d = exa_('"' + app.name + '"', 5);
-    deepResults.searches.push('exact name');
-    for (const r of (d.results || [])) {
-      deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+    deepResults.searches.push('exact-name');
+    for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+  } catch (e) { deepResults.errors.push('Exact: ' + e.message); }
+
+  // Search 6: Org + country context (catches local-language results)
+  if (app.org && app.org.length > 3) {
+    try {
+      const d = exa_(app.org + ' founded mission team', 5);
+      deepResults.searches.push('org-deep');
+      for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+    } catch (e) { deepResults.errors.push('Org-deep: ' + e.message); }
+  }
+
+  // Search 7: Follow up on specific next-step URLs or topics
+  if (nextSteps.length > 0) {
+    // Find the highest priority next step that has a searchable action
+    const highPriority = nextSteps.find(s => s.priority === 'high') || nextSteps[0];
+    if (highPriority && highPriority.url && highPriority.url.length > 10) {
+      // Fetch the specific URL that was recommended
+      try {
+        const fetched = exaGetContents_([highPriority.url]);
+        deepResults.searches.push('next-step-url: ' + highPriority.action);
+        for (const f of fetched) deepResults.results.push({ title: f.title, url: f.url, text: f.text });
+      } catch (e) { deepResults.errors.push('Next-step fetch: ' + e.message); }
+    } else if (highPriority) {
+      // Search for the action topic
+      try {
+        const d = exa_(app.name + ' ' + (highPriority.action || ''), 5);
+        deepResults.searches.push('next-step-search: ' + (highPriority.action || '').substring(0, 30));
+        for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
+      } catch (e) { deepResults.errors.push('Next-step search: ' + e.message); }
     }
-  } catch (e) { deepResults.errors.push('Name: ' + e.message); }
+  }
 
   return deepResults;
 }
@@ -461,24 +552,23 @@ function step5_deeperResearch(app, decision, synthesis) {
 // STEP 6: UPDATED SYNTHESIS (gpt-5 — FLAGGED only)
 // ============================================================
 
-const UPDATED_SYNTHESIS_PROMPT = `You are a senior research analyst updating a vetting report with new information.
+const UPDATED_SYNTHESIS_PROMPT = `You are a senior research analyst updating a vetting report after a second round of targeted research.
 
-You previously flagged this applicant because specific information was missing. A second round of targeted web searches has been conducted. Incorporate the new findings into an updated report.
-
-Focus on:
-- Did the new searches resolve the ambiguity?
-- What new facts were confirmed?
-- What remains unverified even after deeper research?
-- Updated recommendation for the reviewer
+RULES:
+- Lead with what the deeper research CONFIRMED or RESOLVED
+- NEVER frame as failures. Every remaining unknown becomes a specific reviewer action.
+- If deeper research found nothing new, say "Additional searches did not surface new information" and give the reviewer a concrete manual step
 
 Respond JSON:
 {
-  "updated_findings": "What the deeper research revealed",
-  "resolved_gaps": ["gaps that were filled"],
-  "remaining_gaps": ["gaps that still exist"],
-  "updated_what_found": ["all confirmed facts including new ones (cite URLs)"],
-  "updated_what_unverified": ["remaining unverified claims"],
-  "updated_reviewer_actions": ["specific actions for reviewer with new context"],
+  "updated_findings": "What the deeper research confirmed or revealed (lead with positives)",
+  "resolved_items": ["items that are now confirmed with new evidence"],
+  "updated_what_found": [
+    {"fact": "confirmed fact from deeper research", "source": "https://..."}
+  ],
+  "remaining_next_steps": [
+    {"action": "what to do", "method": "how to do it", "url": "where", "priority": "high/medium/low"}
+  ],
   "new_key_sources": ["new urls found"]
 }`;
 
@@ -602,8 +692,8 @@ function processOne_(sheet, row) {
         headline: decision.headline_decision,
         reasoning: decision.reasoning,
         whatFound: synthesis.what_was_found,
-        whatMissing: synthesis.what_is_unverified,
-        whatReviewer: synthesis.what_reviewer_should_check,
+        nextSteps: synthesis.next_steps,
+        whatReviewer: synthesis.next_steps,
       });
       return { name: app.name, verdict: decision.verdict };
     }
@@ -625,10 +715,9 @@ function processOne_(sheet, row) {
     const finalDecision = step7_finalDecision(app, synthesis, updatedSynthesis, decision);
     setCell_(sheet, row, CONFIG.COL_FINAL_DECISION, finalDecision.verdict + ' (' + Math.round((finalDecision.confidence || 0) * 100) + '%) — ' + (finalDecision.headline_decision || ''));
 
-    // Merge synthesis
+    // Merge synthesis: combine original + deeper research findings
     const mergedFound = [...(synthesis.what_was_found || []), ...(updatedSynthesis.updated_what_found || [])];
-    const mergedMissing = updatedSynthesis.updated_what_unverified || synthesis.what_is_unverified || [];
-    const mergedReviewer = updatedSynthesis.updated_reviewer_actions || synthesis.what_reviewer_should_check || [];
+    const mergedNextSteps = updatedSynthesis.remaining_next_steps || synthesis.next_steps || [];
     const mergedSources = [...(synthesis.key_sources || []), ...(updatedSynthesis.new_key_sources || [])];
 
     // Update sources with new ones
@@ -643,8 +732,8 @@ function processOne_(sheet, row) {
       headline: finalDecision.headline_decision || decision.headline_decision,
       reasoning: decision.reasoning + '\n\n[After deeper research] ' + finalDecision.reasoning,
       whatFound: mergedFound,
-      whatMissing: mergedMissing,
-      whatReviewer: mergedReviewer,
+      nextSteps: mergedNextSteps,
+      whatReviewer: mergedNextSteps,
     });
 
     return { name: app.name, verdict: finalVerdict };
@@ -670,10 +759,33 @@ function writeSynthesis_(sheet, row, syn, research) {
   setCell_(sheet, row, CONFIG.COL_HR_ALIGNMENT, syn.human_rights_alignment || '');
   setCell_(sheet, row, CONFIG.COL_GOVT_CONNECTIONS, syn.government_connections || '');
   setCell_(sheet, row, CONFIG.COL_RED_FLAGS, syn.red_flags || '');
-  setCell_(sheet, row, CONFIG.COL_INFO_GAPS, syn.information_gaps || '');
+  setCell_(sheet, row, CONFIG.COL_INFO_GAPS, syn.next_steps_to_complete || '');
   setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, (syn.key_sources || []).join('\n'));
   if (research.linkedin) setCell_(sheet, row, CONFIG.COL_LINKEDIN_URL, research.linkedin);
   if (research.twitter) setCell_(sheet, row, CONFIG.COL_TWITTER_URL, research.twitter);
+}
+
+function formatWhatFound_(items) {
+  /** Format what_was_found — handles both old string arrays and new object arrays */
+  if (!items || !Array.isArray(items)) return '';
+  return items.map(item => {
+    if (typeof item === 'string') return '✅ ' + item;
+    return '✅ ' + (item.fact || '') + (item.source ? ' — ' + item.source : '');
+  }).join('\n');
+}
+
+function formatNextSteps_(steps) {
+  /** Format next_steps as actionable checklist */
+  if (!steps || !Array.isArray(steps)) return '';
+  return steps.map((s, i) => {
+    if (typeof s === 'string') return '☐ ' + s;
+    const priority = (s.priority || '').toUpperCase();
+    const tag = priority === 'HIGH' ? '🔴' : priority === 'MEDIUM' ? '🟡' : '🟢';
+    let line = tag + ' ' + (s.action || '');
+    if (s.method) line += '\n   How: ' + s.method;
+    if (s.url) line += '\n   Link: ' + s.url;
+    return line;
+  }).join('\n\n');
 }
 
 function writeOutput_(sheet, row, start, data) {
@@ -695,9 +807,9 @@ function writeOutput_(sheet, row, start, data) {
   setCell_(sheet, row, CONFIG.COL_REASONING, data.reasoning || '');
   setCell_(sheet, row, CONFIG.COL_LATENCY, elapsed + 's');
 
-  if (data.whatFound) setCell_(sheet, row, CONFIG.COL_WHAT_FOUND, (Array.isArray(data.whatFound) ? data.whatFound : []).join('\n'));
-  if (data.whatMissing) setCell_(sheet, row, CONFIG.COL_WHAT_MISSING, (Array.isArray(data.whatMissing) ? data.whatMissing : []).join('\n'));
-  if (data.whatReviewer) setCell_(sheet, row, CONFIG.COL_WHAT_REVIEWER_SHOULD, (Array.isArray(data.whatReviewer) ? data.whatReviewer : []).join('\n'));
+  if (data.whatFound) setCell_(sheet, row, CONFIG.COL_WHAT_FOUND, formatWhatFound_(data.whatFound));
+  if (data.nextSteps) setCell_(sheet, row, CONFIG.COL_WHAT_MISSING, formatNextSteps_(data.nextSteps));
+  if (data.whatReviewer) setCell_(sheet, row, CONFIG.COL_WHAT_REVIEWER_SHOULD, formatNextSteps_(data.whatReviewer));
 
   SpreadsheetApp.flush();
 }
