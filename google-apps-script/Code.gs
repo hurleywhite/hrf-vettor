@@ -32,31 +32,30 @@ const CONFIG = {
   // Output columns — matches user's exact spec starting at S
   COL_STATUS: 'S',              // Processing status
   COL_AI_VERDICT: 'T',          // AI Verdict
-  COL_CONFIDENCE: 'U',          // Confidence %
-  COL_HEADLINE: 'V',            // Headline Decision
-  COL_WHAT_FOUND: 'W',          // What Was Confirmed
-  COL_WHAT_MISSING: 'X',        // Next Steps to Complete Vetting
-  COL_WHAT_REVIEWER_SHOULD: 'Y',// Reviewer Action Items
-  COL_REASONING: 'Z',           // Full Reasoning
-  COL_IDENTITY: 'AA',           // Identity Summary
-  COL_PROFESSIONAL: 'AB',       // Professional Background
-  COL_ORG_VERIFICATION: 'AC',   // Organization Verification
-  COL_PUBLIC_PRESENCE: 'AD',    // Public Presence
-  COL_HR_ALIGNMENT: 'AE',       // Human Rights Alignment
-  COL_GOVT_CONNECTIONS: 'AF',   // Government Connections
-  COL_RED_FLAGS: 'AG',          // Red Flags
-  COL_INFO_GAPS: 'AH',          // Next Steps (Narrative)
+  COL_HEADLINE: 'U',            // Headline Decision
+  COL_WHAT_FOUND: 'V',          // What Was Confirmed
+  COL_WHAT_MISSING: 'W',        // Next Steps to Complete Vetting
+  COL_WHAT_REVIEWER_SHOULD: 'X',// Reviewer Action Items
+  COL_REASONING: 'Y',           // Full Reasoning
+  COL_IDENTITY: 'Z',            // Identity Summary
+  COL_PROFESSIONAL: 'AA',       // Professional Background
+  COL_ORG_VERIFICATION: 'AB',   // Organization Verification
+  COL_PUBLIC_PRESENCE: 'AC',    // Public Presence
+  COL_HR_ALIGNMENT: 'AD',       // Human Rights Alignment
+  COL_GOVT_CONNECTIONS: 'AE',   // Government Connections
+  COL_RED_FLAGS: 'AF',          // Red Flags
+  COL_INFO_GAPS: 'AG',          // Next Steps (Narrative)
 
   // Utility columns (hidden by default)
-  COL_LINKEDIN_URL: 'AI',       // LinkedIn found
-  COL_TWITTER_URL: 'AJ',        // Twitter found
-  COL_KEY_SOURCES: 'AK',        // Source URLs
-  COL_SPAM_RESULT: 'AL',        // Step 1 result
-  COL_INITIAL_DECISION: 'AM',   // Step 3 result
-  COL_DEEP_RESEARCH: 'AN',      // Step 5 result (if flagged)
-  COL_FINAL_DECISION: 'AO',     // Step 7 result (if flagged)
-  COL_LATENCY: 'AP',            // Processing time
-  COL_REVIEWER_NOTE: 'AQ',      // Human reviewer notes
+  COL_LINKEDIN_URL: 'AH',       // LinkedIn found
+  COL_TWITTER_URL: 'AI',        // Twitter found
+  COL_KEY_SOURCES: 'AJ',        // Source URLs
+  COL_SPAM_RESULT: 'AK',        // Step 1 result
+  COL_INITIAL_DECISION: 'AL',   // Step 3 result
+  COL_DEEP_RESEARCH: 'AM',      // Step 5 result (if flagged)
+  COL_FINAL_DECISION: 'AN',     // Step 7 result (if flagged)
+  COL_LATENCY: 'AO',            // Processing time
+  COL_REVIEWER_NOTE: 'AP',      // Human reviewer notes
 
   // Models
   MODEL_SPAM: 'gpt-4o-mini',
@@ -98,7 +97,6 @@ function setupOutputColumns() {
     [CONFIG.COL_PROFILE]: 'Profile',
     [CONFIG.COL_STATUS]: 'Status',
     [CONFIG.COL_AI_VERDICT]: 'AI Verdict',
-    [CONFIG.COL_CONFIDENCE]: 'Confidence',
     [CONFIG.COL_HEADLINE]: 'Headline Decision',
     [CONFIG.COL_WHAT_FOUND]: 'What Was Confirmed',
     [CONFIG.COL_WHAT_MISSING]: 'Next Steps to Complete Vetting',
@@ -932,7 +930,6 @@ function writeOutput_(sheet, row, start, data) {
   }
 
   setCell_(sheet, row, CONFIG.COL_STATUS, '✅ Complete');
-  setCell_(sheet, row, CONFIG.COL_CONFIDENCE, data.confidence + '%');
   setCell_(sheet, row, CONFIG.COL_HEADLINE, data.headline || '');
   setCell_(sheet, row, CONFIG.COL_REASONING, data.reasoning || '');
   setCell_(sheet, row, CONFIG.COL_LATENCY, elapsed + 's');
