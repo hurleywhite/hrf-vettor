@@ -171,7 +171,7 @@ function getKey_(name) {
   return k;
 }
 
-function gpt_(model, system, user, maxTokens) {
+function gpt_(model, system, user, maxTokens, isRetry) {
   // Build request — some models (gpt-5, o3) may not support json_object format
   const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   const body = {
@@ -200,21 +200,41 @@ function gpt_(model, system, user, maxTokens) {
     throw new Error('OpenAI ' + code + ': ' + text.substring(0, 200));
   }
 
-  // Parse response — handle both regular and reasoning model response formats
+  // Parse response — handle regular, reasoning model, and other formats
   const resp = JSON.parse(text);
   let raw = '';
 
-  // Standard chat completion
-  if (resp.choices && resp.choices[0] && resp.choices[0].message) {
-    raw = resp.choices[0].message.content || '';
+  if (resp.choices && resp.choices[0]) {
+    const choice = resp.choices[0];
+    // Standard: message.content
+    if (choice.message && choice.message.content) {
+      raw = choice.message.content;
+    }
+    // Reasoning model: might have output_text or output
+    else if (choice.message && choice.message.output) {
+      raw = choice.message.output;
+    }
+    // Some models use text field
+    else if (choice.text) {
+      raw = choice.text;
+    }
   }
-  // Reasoning model format (o3, gpt-5 may use this)
-  if (!raw && resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.reasoning) {
-    raw = resp.choices[0].message.content || resp.choices[0].message.reasoning || '';
+  // Responses API format (gpt-5 might use this)
+  if (!raw && resp.output) {
+    if (typeof resp.output === 'string') raw = resp.output;
+    else if (Array.isArray(resp.output)) {
+      // Find the message output in the array
+      for (const item of resp.output) {
+        if (item.type === 'message' && item.content) {
+          for (const c of item.content) {
+            if (c.type === 'output_text' || c.type === 'text') raw = c.text || '';
+          }
+        }
+      }
+    }
   }
-  // Fallback
   if (!raw) {
-    Logger.log('OpenAI unexpected response structure: ' + JSON.stringify(resp).substring(0, 500));
+    Logger.log('OpenAI unexpected structure: ' + JSON.stringify(resp).substring(0, 800));
     raw = '{}';
   }
 
@@ -237,7 +257,15 @@ function gpt_(model, system, user, maxTokens) {
   try {
     return JSON.parse(s.trim() || '{}');
   } catch (e) {
-    Logger.log('JSON parse failed for ' + model + ': ' + e.message + ' | Raw: ' + s.substring(0, 300));
+    Logger.log('JSON parse failed for ' + model + ': ' + e.message + ' | Raw: ' + s.substring(0, 500));
+
+    // Retry once with explicit JSON instruction appended
+    if (!isRetry) {
+      Logger.log('Retrying ' + model + ' with stronger JSON instruction...');
+      return gpt_(model,
+        system + '\n\nCRITICAL: You MUST respond with ONLY a valid JSON object. No text before or after. Start with { and end with }.',
+        user, maxTokens, true);
+    }
     return {};
   }
 }
@@ -573,7 +601,7 @@ function step4_synthesisReport(app, research, decision) {
   }
 
   return gpt_(CONFIG.MODEL_SYNTHESIS, SYNTHESIS_PROMPT,
-    `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nComments: ${app.comments}\nLinkedIn: ${research.linkedin || 'not found'}\nTwitter: ${research.twitter || 'not found'}\n\n## Initial Decision: ${decision.verdict} (${Math.round((decision.overall_confidence || 0) * 100)}%)\nReasoning: ${decision.reasoning}\n${decision.flag_reason ? 'Flag reason: ' + decision.flag_reason : ''}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
+    `## Application\nName: ${app.name}\nTitle: ${app.title}\nOrg: ${app.org}\nInterest: ${app.interest}\nComments: ${app.comments}\nLinkedIn: ${research.linkedin || 'not found'}\nTwitter: ${research.twitter || 'not found'}\n\n## Initial Decision: ${decision.verdict}\nReasoning: ${decision.reasoning || 'N/A'}\n${decision.flag_reason ? 'Flag reason: ' + decision.flag_reason : ''}\n\n## Web Research (${research.results.length} results)\n${articlesText}\n\n## Org Research\n${orgText || 'None'}`,
     3000);
 }
 
