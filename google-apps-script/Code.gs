@@ -65,7 +65,7 @@ const CONFIG = {
 
   // Thresholds
   BATCH_SIZE: 10,
-  SPAM_THRESHOLD: 0.95,
+  SPAM_THRESHOLD: 0.80,  // 80% — catch obvious spam without over-filtering
   CONFIDENCE_THRESHOLD: 50,  // 50% — if org verified + work aligns + no red flags, approve
 };
 
@@ -172,12 +172,18 @@ function getKey_(name) {
 }
 
 function gpt_(model, system, user, maxTokens) {
+  // Build request — some models (gpt-5, o3) may not support json_object format
+  const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
   const body = {
     model: model,
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    messages: messages,
     max_completion_tokens: maxTokens || 2000,
-    response_format: { type: 'json_object' },
   };
+
+  // Only add response_format for models that support it
+  if (model.indexOf('gpt-4o') !== -1 || model.indexOf('gpt-4-') !== -1) {
+    body.response_format = { type: 'json_object' };
+  }
 
   const r = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
     method: 'post',
@@ -186,14 +192,54 @@ function gpt_(model, system, user, maxTokens) {
     muteHttpExceptions: true,
   });
 
-  if (r.getResponseCode() !== 200) throw new Error('OpenAI ' + r.getResponseCode() + ': ' + r.getContentText());
-  const raw = JSON.parse(r.getContentText()).choices[0].message.content || '{}';
+  const code = r.getResponseCode();
+  const text = r.getContentText();
 
-  // Parse JSON (handle markdown code blocks)
+  if (code !== 200) {
+    Logger.log('OpenAI ERROR ' + code + ': ' + text.substring(0, 500));
+    throw new Error('OpenAI ' + code + ': ' + text.substring(0, 200));
+  }
+
+  // Parse response — handle both regular and reasoning model response formats
+  const resp = JSON.parse(text);
+  let raw = '';
+
+  // Standard chat completion
+  if (resp.choices && resp.choices[0] && resp.choices[0].message) {
+    raw = resp.choices[0].message.content || '';
+  }
+  // Reasoning model format (o3, gpt-5 may use this)
+  if (!raw && resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.reasoning) {
+    raw = resp.choices[0].message.content || resp.choices[0].message.reasoning || '';
+  }
+  // Fallback
+  if (!raw) {
+    Logger.log('OpenAI unexpected response structure: ' + JSON.stringify(resp).substring(0, 500));
+    raw = '{}';
+  }
+
+  Logger.log('GPT raw response (' + model + '): ' + raw.substring(0, 200));
+
+  // Extract JSON from response (handle markdown code blocks, preamble text, etc.)
   let s = raw;
   if (s.indexOf('```json') !== -1) s = s.split('```json')[1].split('```')[0];
   else if (s.indexOf('```') !== -1) s = s.split('```')[1].split('```')[0];
-  return JSON.parse(s.trim() || '{}');
+
+  // Try to find JSON object in the response if it starts with text
+  if (s.trim().charAt(0) !== '{') {
+    const jsonStart = s.indexOf('{');
+    const jsonEnd = s.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      s = s.substring(jsonStart, jsonEnd + 1);
+    }
+  }
+
+  try {
+    return JSON.parse(s.trim() || '{}');
+  } catch (e) {
+    Logger.log('JSON parse failed for ' + model + ': ' + e.message + ' | Raw: ' + s.substring(0, 300));
+    return {};
+  }
 }
 
 function exa_(query, numResults) {
@@ -794,11 +840,24 @@ function processOne_(sheet, row) {
     SpreadsheetApp.flush();
     const decision = step3_initialDecision(app, research);
 
+    // Log full decision object for debugging
+    Logger.log('Row ' + row + ' decision keys: ' + Object.keys(decision).join(', '));
+    Logger.log('Row ' + row + ' decision.verdict: ' + decision.verdict);
+
+    // If decision came back empty, GPT response parsing failed
+    if (!decision.verdict && Object.keys(decision).length === 0) {
+      setCell_(sheet, row, CONFIG.COL_STATUS, '⚠️ GPT returned empty response');
+      setCell_(sheet, row, CONFIG.COL_AI_VERDICT, 'ERROR');
+      setCell_(sheet, row, CONFIG.COL_REASONING, 'Step 3 returned empty. GPT-5 may not support JSON mode. Check Apps Script > Executions for logs.');
+      SpreadsheetApp.flush();
+      return { name: app.name, verdict: 'ERROR', error: 'Empty GPT response' };
+    }
+
     // Calculate confidence from verified factors (not GPT guess)
     const verifications = decision.verifications || {};
     const confidence = calculateConfidence_(app, research, verifications);
     const decisionReasoning = decision.reasoning || decision.justification || decision.explanation || 'No reasoning provided';
-    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + confidence + '%) — ' + (decision.headline_decision || decision.headline || ''));
+    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, (decision.verdict || 'UNKNOWN') + ' (' + confidence + '%) — ' + (decision.headline_decision || decision.headline || ''));
 
     // ── STEP 4: Synthesis Report (ALL applicants) ──
     setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 4: Building report...');
