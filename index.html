@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HRF OFF Vettor v2</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: {
+        dark: { 900: '#0b1120', 800: '#111827', 700: '#1e293b', 600: '#334155' }
+      }}}
+    }
+  </script>
+  <style>
+    body { background: #0b1120; }
+    .verdict-approved { background: #064e3b; color: #4ade80; }
+    .verdict-flagged { background: #78350f; color: #fbbf24; }
+    .verdict-rejected { background: #7f1d1d; color: #f87171; }
+    .verdict-spam { background: #3b0764; color: #c084fc; }
+    .verdict-queued { background: #1e3a5f; color: #60a5fa; }
+    .match-true { background: #064e3b; color: #4ade80; }
+    .match-false { background: #7f1d1d; color: #f87171; }
+    .sc-confirmed { background: #064e3b; color: #4ade80; }
+    .sc-notfound { background: #1e3a5f; color: #60a5fa; }
+    .sc-concerning { background: #7f1d1d; color: #f87171; }
+    .tab-active { border-bottom: 2px solid #60a5fa; color: #f1f5f9; }
+    .tab-inactive { color: #64748b; }
+    .fade-in { animation: fadeIn 0.2s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  </style>
+</head>
+<body class="text-gray-200 min-h-screen">
+  <div id="app" class="max-w-7xl mx-auto px-4 py-6">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-bold text-white">HRF OFF Vettor v2</h1>
+        <p class="text-sm text-gray-400">Oslo Freedom Forum Applicant Vetting Pipeline</p>
+      </div>
+      <div id="loading" class="text-sm text-gray-500">Loading...</div>
+    </div>
+
+    <!-- Stats -->
+    <div id="stats" class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6"></div>
+
+    <!-- Filter tabs -->
+    <div id="filters" class="flex gap-4 mb-4 border-b border-gray-700 pb-2 text-sm cursor-pointer"></div>
+
+    <!-- Main content area -->
+    <div id="content"></div>
+
+    <!-- Detail modal -->
+    <div id="modal" class="fixed inset-0 bg-black/70 z-50 hidden overflow-y-auto">
+      <div class="max-w-4xl mx-auto my-8 px-4">
+        <div id="modal-content" class="bg-dark-800 rounded-xl p-6 fade-in"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const SUPABASE_URL = 'https://azbhhmxkdwfdmghtonml.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF6YmhobXhrZHdmZG1naHRvbm1sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5MDc4OTMsImV4cCI6MjA5MDQ4Mzg5M30.6pCD7Bkd_q-RQQVLLBnyjpBx2iKKiYcBMsw1c_upicY';
+
+    let allApplicants = [];
+    let allResults = [];
+    let currentFilter = 'all';
+
+    async function query(table, params = '') {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
+        headers: { 'apikey': SUPABASE_ANON, 'Authorization': `Bearer ${SUPABASE_ANON}` }
+      });
+      return res.json();
+    }
+
+    function badge(verdict) {
+      const v = (verdict || '').toLowerCase();
+      return `<span class="verdict-${v} px-3 py-1 rounded-full text-xs font-semibold">${v.toUpperCase()}</span>`;
+    }
+
+    function matchBadge(ai, hrf) {
+      const a = (ai || '').toLowerCase(), h = (hrf || '').toLowerCase();
+      const match = a === h || (a === 'spam' && h === 'rejected');
+      return `<span class="match-${match} px-2 py-0.5 rounded-full text-xs font-semibold">${match ? 'MATCH' : 'MISS'}</span>`;
+    }
+
+    function confidenceBar(conf) {
+      if (!conf) return '';
+      const pct = Math.round(conf * 100);
+      const color = pct >= 80 ? '#4ade80' : pct >= 60 ? '#fbbf24' : '#f87171';
+      return `<div class="flex items-center gap-2">
+        <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+          <div style="width:${pct}%;background:${color}" class="h-full rounded-full"></div>
+        </div>
+        <span class="text-xs text-gray-400">${pct}%</span>
+      </div>`;
+    }
+
+    function renderStats() {
+      const processed = allResults.length;
+      const total = allApplicants.length;
+      const counts = { approved: 0, flagged: 0, rejected: 0, spam: 0 };
+      let matches = 0;
+
+      for (const r of allResults) {
+        const v = (r.ai_final_verdict || '').toLowerCase();
+        if (counts[v] !== undefined) counts[v]++;
+        const app = allApplicants.find(a => a.id === r.applicant_id);
+        const h = (app?.hrf_ground_truth || '').toLowerCase();
+        if (v === h || (v === 'spam' && h === 'rejected')) matches++;
+      }
+
+      const accuracy = processed > 0 ? Math.round((matches / processed) * 100) : 0;
+      const queued = allApplicants.filter(a => a.status === 'queued').length;
+
+      document.getElementById('stats').innerHTML = `
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-blue-400">${accuracy}%</div>
+          <div class="text-xs text-gray-400 mt-1">Accuracy (${matches}/${processed})</div>
+        </div>
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-green-400">${counts.approved}</div>
+          <div class="text-xs text-gray-400 mt-1">Approved</div>
+        </div>
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-yellow-400">${counts.flagged}</div>
+          <div class="text-xs text-gray-400 mt-1">Flagged</div>
+        </div>
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-red-400">${counts.rejected}</div>
+          <div class="text-xs text-gray-400 mt-1">Rejected</div>
+        </div>
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-purple-400">${counts.spam}</div>
+          <div class="text-xs text-gray-400 mt-1">Spam</div>
+        </div>
+        <div class="bg-dark-700 rounded-xl p-4">
+          <div class="text-2xl font-bold text-gray-400">${queued}</div>
+          <div class="text-xs text-gray-400 mt-1">Queued (${total} total)</div>
+        </div>
+      `;
+    }
+
+    function renderFilters() {
+      const tabs = ['all', 'processed', 'approved', 'flagged', 'rejected', 'spam', 'queued', 'mismatches'];
+      document.getElementById('filters').innerHTML = tabs.map(t =>
+        `<div onclick="setFilter('${t}')" class="pb-1 ${currentFilter === t ? 'tab-active' : 'tab-inactive'} hover:text-gray-300 transition">${t.charAt(0).toUpperCase() + t.slice(1)}</div>`
+      ).join('');
+    }
+
+    function setFilter(f) {
+      currentFilter = f;
+      renderFilters();
+      renderTable();
+    }
+
+    function getFilteredData() {
+      return allApplicants.map(a => {
+        const r = allResults.find(res => res.applicant_id === a.id);
+        return { ...a, result: r };
+      }).filter(a => {
+        if (currentFilter === 'all') return true;
+        if (currentFilter === 'processed') return a.result;
+        if (currentFilter === 'queued') return a.status === 'queued';
+        if (currentFilter === 'mismatches') {
+          if (!a.result) return false;
+          const ai = (a.result.ai_final_verdict || '').toLowerCase();
+          const hrf = (a.hrf_ground_truth || '').toLowerCase();
+          return ai !== hrf && !(ai === 'spam' && hrf === 'rejected');
+        }
+        return a.result && (a.result.ai_final_verdict || '').toLowerCase() === currentFilter;
+      });
+    }
+
+    function renderTable() {
+      const data = getFilteredData();
+      const rows = data.map(a => {
+        const r = a.result;
+        if (r) {
+          return `<tr class="hover:bg-dark-600 cursor-pointer transition" onclick="openDetail(${a.id})">
+            <td class="px-4 py-3 font-medium text-white">${a.full_name}</td>
+            <td class="px-4 py-3 text-sm text-gray-400">${a.organization || '-'}</td>
+            <td class="px-4 py-3">${badge(r.ai_final_verdict)}</td>
+            <td class="px-4 py-3">${confidenceBar(r.ai_confidence)}</td>
+            <td class="px-4 py-3">${badge(a.hrf_ground_truth)}</td>
+            <td class="px-4 py-3">${matchBadge(r.ai_final_verdict, a.hrf_ground_truth)}</td>
+            <td class="px-4 py-3 text-xs text-gray-500 max-w-xs truncate">${r.recommended_next_step || '-'}</td>
+          </tr>`;
+        }
+        return `<tr class="hover:bg-dark-600 cursor-pointer transition" onclick="openDetail(${a.id})">
+          <td class="px-4 py-3 text-gray-400">${a.full_name}</td>
+          <td class="px-4 py-3 text-sm text-gray-500">${a.organization || '-'}</td>
+          <td class="px-4 py-3">${badge('queued')}</td>
+          <td class="px-4 py-3">-</td>
+          <td class="px-4 py-3">${badge(a.hrf_ground_truth)}</td>
+          <td class="px-4 py-3">-</td>
+          <td class="px-4 py-3 text-xs text-gray-600">Waiting to be processed</td>
+        </tr>`;
+      }).join('');
+
+      document.getElementById('content').innerHTML = `
+        <div class="bg-dark-800 rounded-xl overflow-hidden">
+          <table class="w-full">
+            <thead>
+              <tr class="bg-dark-600">
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Organization</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">AI Verdict</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Confidence</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">HRF Truth</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Match</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Next Step</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-700/50">${rows}</tbody>
+          </table>
+        </div>
+        <p class="text-xs text-gray-600 mt-3">Showing ${data.length} applicant${data.length !== 1 ? 's' : ''}</p>
+      `;
+    }
+
+    function openDetail(id) {
+      const a = allApplicants.find(x => x.id === id);
+      const r = allResults.find(x => x.applicant_id === id);
+      if (!a) return;
+
+      const dossier = r?.dossier_json || {};
+      const confirmed = r?.scorecard_confirmed || [];
+      const notFound = r?.scorecard_not_found || [];
+      const concerning = r?.scorecard_concerning || [];
+
+      const googleResults = (dossier.google_results || []).slice(0, 10).map(g =>
+        `<a href="${g.url}" target="_blank" class="block mb-2 hover:bg-dark-600 p-2 rounded-lg transition">
+          <div class="text-sm text-blue-400">${g.title || 'Untitled'}</div>
+          <div class="text-xs text-gray-500 truncate">${g.url || ''}</div>
+          <div class="text-xs text-gray-400 mt-0.5">${(g.snippet || '').substring(0, 200)}</div>
+        </a>`
+      ).join('') || '<p class="text-gray-500 text-sm">No Google results found</p>';
+
+      const socialLinks = [];
+      if (r?.linkedin_found && r?.linkedin_url) socialLinks.push(`<a href="${r.linkedin_url}" target="_blank" class="bg-blue-900/30 text-blue-400 px-3 py-1 rounded-lg text-xs hover:bg-blue-900/50">LinkedIn</a>`);
+      if (r?.twitter_found && r?.twitter_url) socialLinks.push(`<a href="${r.twitter_url}" target="_blank" class="bg-sky-900/30 text-sky-400 px-3 py-1 rounded-lg text-xs hover:bg-sky-900/50">Twitter/X</a>`);
+      if (r?.instagram_found && r?.instagram_url) socialLinks.push(`<a href="${r.instagram_url}" target="_blank" class="bg-pink-900/30 text-pink-400 px-3 py-1 rounded-lg text-xs hover:bg-pink-900/50">Instagram</a>`);
+      if (r?.facebook_found && r?.facebook_url) socialLinks.push(`<a href="${r.facebook_url}" target="_blank" class="bg-indigo-900/30 text-indigo-400 px-3 py-1 rounded-lg text-xs hover:bg-indigo-900/50">Facebook</a>`);
+      const socialHtml = socialLinks.length > 0 ? socialLinks.join(' ') : '<span class="text-gray-500 text-sm">None discovered</span>';
+
+      const scorecardHtml = `
+        ${confirmed.map(c => `<span class="sc-confirmed px-2 py-1 rounded text-xs inline-block mb-1 mr-1">${c}</span>`).join('')}
+        ${notFound.map(n => `<span class="sc-notfound px-2 py-1 rounded text-xs inline-block mb-1 mr-1">${n}</span>`).join('')}
+        ${concerning.map(c => `<span class="sc-concerning px-2 py-1 rounded text-xs inline-block mb-1 mr-1">${c}</span>`).join('')}
+      `;
+
+      document.getElementById('modal-content').innerHTML = `
+        <div class="flex justify-between items-start mb-6">
+          <div>
+            <h2 class="text-xl font-bold text-white">${a.full_name}</h2>
+            <p class="text-gray-400 text-sm mt-1">${a.title || ''} ${a.title && a.organization ? 'at' : ''} ${a.organization || ''}</p>
+          </div>
+          <button onclick="closeModal()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
+
+        ${r ? `
+        <!-- Verdict bar -->
+        <div class="flex items-center gap-3 mb-4 bg-dark-700 rounded-xl p-4">
+          <div>AI: ${badge(r.ai_final_verdict)}</div>
+          <div>${confidenceBar(r.ai_confidence)}</div>
+          <div class="text-gray-500">|</div>
+          <div>HRF: ${badge(a.hrf_ground_truth)}</div>
+          <div>${matchBadge(r.ai_final_verdict, a.hrf_ground_truth)}</div>
+        </div>
+
+        <!-- Next step -->
+        ${r.recommended_next_step ? `
+        <div class="bg-blue-950/40 border border-blue-800/50 rounded-xl p-4 mb-4">
+          <div class="text-xs text-blue-400 font-semibold mb-2">RECOMMENDED NEXT STEP</div>
+          <p class="text-sm text-blue-200 leading-relaxed">${r.recommended_next_step}</p>
+        </div>` : ''}
+
+        <div class="grid md:grid-cols-2 gap-4">
+          <!-- Scorecard -->
+          <div class="bg-dark-700 rounded-xl p-4">
+            <h3 class="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">Verification Scorecard</h3>
+            <div class="flex flex-wrap gap-1">${scorecardHtml || '<span class="text-gray-500 text-sm">No scorecard data</span>'}</div>
+          </div>
+
+          <!-- Social Media -->
+          <div class="bg-dark-700 rounded-xl p-4">
+            <h3 class="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">Web Presence Discovered</h3>
+            <div class="flex flex-wrap gap-2">${socialHtml}</div>
+          </div>
+
+          <!-- AI Reasoning -->
+          <div class="bg-dark-700 rounded-xl p-4 md:col-span-2">
+            <h3 class="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">AI Reasoning</h3>
+            <p class="text-sm text-gray-300 leading-relaxed">${r.stage2_reasoning || 'N/A'}</p>
+            ${r.stage3_reasoning && r.stage3_verdict !== 'skipped' ? `
+            <div class="mt-3 pt-3 border-t border-gray-600">
+              <h4 class="text-xs text-yellow-400 font-semibold mb-1">Stage 3 Deep Review</h4>
+              <p class="text-sm text-gray-300 leading-relaxed">${r.stage3_reasoning}</p>
+            </div>` : ''}
+          </div>
+
+          <!-- Google Results -->
+          <div class="bg-dark-700 rounded-xl p-4 md:col-span-2">
+            <h3 class="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">Google Search Results (${(dossier.google_results || []).length} found)</h3>
+            <div class="max-h-64 overflow-y-auto">${googleResults}</div>
+          </div>
+        </div>
+
+        <!-- Pipeline metadata -->
+        <div class="mt-4 bg-dark-700 rounded-xl p-4">
+          <div class="text-xs text-gray-500">
+            Stage 1: ${r.model_used_stage1 || '-'} (${r.stage1_verdict || '-'}) |
+            Stage 2: ${r.model_used_stage2 || '-'} |
+            Stage 3: ${r.model_used_stage3 || 'skipped'} |
+            Latency: ${r.total_latency_ms ? Math.round(r.total_latency_ms / 1000) + 's' : '-'} |
+            Scrapers: ${(r.apify_actors_run || []).join(', ') || '-'}
+          </div>
+        </div>
+        ` : `
+        <div class="bg-dark-700 rounded-xl p-4 mb-4">
+          <p class="text-gray-400">This applicant has not been processed yet. HRF verdict: ${badge(a.hrf_ground_truth)}</p>
+        </div>
+        `}
+
+        <!-- Application Details -->
+        <div class="mt-4 bg-dark-700 rounded-xl p-4">
+          <h3 class="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">Original Application</h3>
+          <div class="grid md:grid-cols-2 gap-3 text-sm">
+            <div><span class="text-gray-500">Email:</span> <span class="text-gray-300">${a.email || '-'}</span></div>
+            <div><span class="text-gray-500">How heard:</span> <span class="text-gray-300">${a.how_heard || '-'}</span></div>
+            <div><span class="text-gray-500">Previous attendance:</span> <span class="text-gray-300">${a.previous_attendance ? 'Yes' : 'No'}${a.previous_forums ? ' - ' + a.previous_forums : ''}</span></div>
+            <div><span class="text-gray-500">HRF reviewer:</span> <span class="text-gray-300">${a.hrf_approved_by || '-'}</span></div>
+          </div>
+          ${a.interest_statement ? `
+          <div class="mt-3">
+            <span class="text-gray-500 text-sm">Interest statement:</span>
+            <p class="text-gray-300 text-sm mt-1 leading-relaxed max-h-40 overflow-y-auto">${a.interest_statement.substring(0, 2000)}</p>
+          </div>` : ''}
+          ${a.hrf_comments ? `<div class="mt-2"><span class="text-gray-500 text-sm">HRF comments:</span> <span class="text-gray-300 text-sm">${a.hrf_comments}</span></div>` : ''}
+          ${a.hrf_approver_comment ? `<div class="mt-1"><span class="text-gray-500 text-sm">Approver notes:</span> <span class="text-gray-300 text-sm">${a.hrf_approver_comment}</span></div>` : ''}
+        </div>
+      `;
+
+      document.getElementById('modal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('modal').classList.add('hidden');
+    }
+
+    document.getElementById('modal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('modal')) closeModal();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+
+    async function init() {
+      try {
+        [allApplicants, allResults] = await Promise.all([
+          query('applicants', 'select=*&order=id.asc'),
+          query('vetting_results', 'select=*&order=id.asc')
+        ]);
+        document.getElementById('loading').textContent = `${allApplicants.length} applicants loaded`;
+        renderStats();
+        renderFilters();
+        renderTable();
+      } catch (err) {
+        document.getElementById('loading').textContent = 'Error loading data';
+        console.error(err);
+      }
+    }
+
+    init();
+    // Auto-refresh every 30s
+    setInterval(init, 30000);
+  </script>
+</body>
+</html>
