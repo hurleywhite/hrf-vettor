@@ -66,7 +66,7 @@ const CONFIG = {
   // Thresholds
   BATCH_SIZE: 10,
   SPAM_THRESHOLD: 0.95,
-  CONFIDENCE_THRESHOLD: 70,  // 70% calculated confidence needed to auto-resolve
+  CONFIDENCE_THRESHOLD: 50,  // 50% — if org verified + work aligns + no red flags, approve
 };
 
 
@@ -818,8 +818,8 @@ function processOne_(sheet, row) {
     // Normalize decision verdict
     const dv = (decision.verdict || '').toUpperCase().trim();
 
-    // Trust REJECTED regardless of confidence, APPROVED needs >= 70%
-    if (dv === 'REJECTED' || (dv === 'APPROVED' && confidence >= 70)) {
+    // Trust REJECTED regardless of confidence, APPROVED needs >= 50%
+    if (dv === 'REJECTED' || (dv === 'APPROVED' && confidence >= CONFIG.CONFIDENCE_THRESHOLD)) {
       writeOutput_(sheet, row, start, {
         verdict: dv,
         confidence: confidence,
@@ -867,10 +867,10 @@ function processOne_(sheet, row) {
     const fv = (finalDecision.verdict || '').toUpperCase().trim();
 
     // Trust REJECTED regardless of confidence (low confidence on reject = "nothing found to verify")
-    // Trust APPROVED only with high confidence (need evidence to approve)
+    // Trust APPROVED if confidence >= threshold (50%)
     // Otherwise FLAGGED for human review
     const finalVerdict = fv === 'REJECTED' ? 'REJECTED'
-      : (fv === 'APPROVED' && finalConfidence >= 70) ? 'APPROVED'
+      : (fv === 'APPROVED' && finalConfidence >= CONFIG.CONFIDENCE_THRESHOLD) ? 'APPROVED'
       : 'FLAGGED';
 
     writeOutput_(sheet, row, start, {
