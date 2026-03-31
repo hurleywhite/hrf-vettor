@@ -65,7 +65,7 @@ const CONFIG = {
 
   // Thresholds
   BATCH_SIZE: 10,
-  SPAM_THRESHOLD: 0.80,  // 80% — catch obvious spam without over-filtering
+  SPAM_THRESHOLD: 0.90,  // 90% — only catch absolute obvious spam (gambling links, gibberish, bots)
   CONFIDENCE_THRESHOLD: 50,  // 50% — if org verified + work aligns + no red flags, approve
 };
 
