@@ -67,7 +67,7 @@ const CONFIG = {
   // Thresholds
   BATCH_SIZE: 3,
   SPAM_THRESHOLD: 0.95,
-  RESOLVE_THRESHOLD: 0.70,
+  CONFIDENCE_THRESHOLD: 70,  // 70% calculated confidence needed to auto-resolve
 };
 
 
@@ -245,6 +245,57 @@ function exaGetContents_(urls) {
 
 
 // ============================================================
+// CONFIDENCE CALCULATOR (factor-based, not GPT-guessed)
+// ============================================================
+// Each factor adds a fixed %. Transparent and explainable.
+//
+//   Name found in web results         +15%
+//   Organization verified as real      +15%
+//   Role at org confirmed              +15%
+//   Has social media presence          +10%
+//   Human rights work confirmed        +15%
+//   No red flags found                 +10%
+//   Interest statement is substantive  +10%
+//   Has been to OFF before             +10%
+//   ─────────────────────────────────
+//   Maximum                            100%
+
+function calculateConfidence_(app, research, verifications) {
+  let score = 0;
+
+  // +15% — Name found in web results
+  if (verifications.name_found_in_results) score += 15;
+
+  // +15% — Organization verified as real
+  if (verifications.org_verified) score += 15;
+
+  // +15% — Role at org confirmed
+  if (verifications.role_confirmed) score += 15;
+
+  // +10% — Has social media presence (any: LinkedIn, Twitter, Instagram)
+  const hasSocial = research.linkedin || research.twitter ||
+    (app.instagram && app.instagram.length > 5) ||
+    (app.facebook && app.facebook.length > 5);
+  if (hasSocial || verifications.social_presence_found) score += 10;
+
+  // +15% — Human rights / activism work confirmed
+  if (verifications.hr_work_confirmed) score += 15;
+
+  // +10% — No red flags
+  if (!verifications.red_flags_found) score += 10;
+
+  // +10% — Interest statement is substantive (>50 words, specific)
+  if (verifications.interest_substantive) score += 10;
+
+  // +10% — Has attended OFF before
+  const attended = (app.prevAttendance || '').toLowerCase();
+  if (attended === 'yes' || attended.indexOf('yes') !== -1) score += 10;
+
+  return score;
+}
+
+
+// ============================================================
 // STEP 1: SPAM FILTER (gpt-4o-mini)
 // ============================================================
 
@@ -377,13 +428,23 @@ FLAG if:
 - Conflicting signals
 - Confidence < 70%
 
+IMPORTANT: Do NOT provide a confidence score. Instead, answer these verification questions as true/false based ONLY on what the web research actually confirmed:
+
 Respond JSON:
 {
   "verdict": "APPROVED" or "FLAGGED" or "REJECTED",
-  "overall_confidence": 0.0-1.0,
   "headline_decision": "One sentence: what was confirmed and why this decision",
   "reasoning": "2-4 sentences",
-  "flag_reason": "If FLAGGED: what specific info is missing that would resolve this?"
+  "flag_reason": "If FLAGGED: what specific info is missing that would resolve this?",
+  "verifications": {
+    "name_found_in_results": true/false,
+    "org_verified": true/false,
+    "role_confirmed": true/false,
+    "social_presence_found": true/false,
+    "hr_work_confirmed": true/false,
+    "red_flags_found": true/false,
+    "interest_substantive": true/false
+  }
 }`;
 
 function step3_initialDecision(app, research) {
@@ -588,18 +649,28 @@ Rules (same as initial):
 - Students/early-career with confirmed identity = APPROVE
 - If STILL ambiguous after deeper research = keep FLAGGED with very specific reviewer instructions
 
+IMPORTANT: Do NOT provide a confidence score. Instead, answer the same verification questions — now updated with what the deeper research confirmed:
+
 Respond JSON:
 {
   "verdict": "APPROVED" or "FLAGGED" or "REJECTED",
-  "confidence": 0.0-1.0,
   "headline_decision": "One sentence final determination",
   "reasoning": "What changed (or didn't) after deeper research",
-  "reviewer_action": "If still FLAGGED: exact action for human reviewer"
+  "reviewer_action": "If still FLAGGED: exact action for human reviewer",
+  "verifications": {
+    "name_found_in_results": true/false,
+    "org_verified": true/false,
+    "role_confirmed": true/false,
+    "social_presence_found": true/false,
+    "hr_work_confirmed": true/false,
+    "red_flags_found": true/false,
+    "interest_substantive": true/false
+  }
 }`;
 
 function step7_finalDecision(app, synthesis, updatedSynthesis, decision) {
   return gpt_(CONFIG.MODEL_DEEP_DECISION, FINAL_DECISION_PROMPT,
-    `## Applicant: ${app.name}, ${app.title} at ${app.org}\n\n## Initial Decision: ${decision.verdict} (${Math.round((decision.overall_confidence || 0) * 100)}%)\n${decision.reasoning}\nFlag reason: ${decision.flag_reason || 'N/A'}\n\n## Original Findings\n${JSON.stringify(synthesis.what_was_found)}\n\n## Deeper Research Findings\n${updatedSynthesis.updated_findings || 'No new findings'}\nResolved: ${JSON.stringify(updatedSynthesis.resolved_gaps)}\nRemaining: ${JSON.stringify(updatedSynthesis.remaining_gaps)}`,
+    `## Applicant: ${app.name}, ${app.title} at ${app.org}\n\n## Initial Decision: ${decision.verdict}\n${decision.reasoning}\nFlag reason: ${decision.flag_reason || 'N/A'}\n\n## Original Findings\n${JSON.stringify(synthesis.what_was_found)}\n\n## Deeper Research Findings\n${updatedSynthesis.updated_findings || 'No new findings'}\nResolved: ${JSON.stringify(updatedSynthesis.resolved_gaps)}\nRemaining: ${JSON.stringify(updatedSynthesis.remaining_gaps)}`,
     1500);
 }
 
@@ -704,7 +775,11 @@ function processOne_(sheet, row) {
     setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 3: Initial decision...');
     SpreadsheetApp.flush();
     const decision = step3_initialDecision(app, research);
-    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + Math.round((decision.overall_confidence || 0) * 100) + '%) — ' + (decision.headline_decision || ''));
+
+    // Calculate confidence from verified factors (not GPT guess)
+    const verifications = decision.verifications || {};
+    const confidence = calculateConfidence_(app, research, verifications);
+    setCell_(sheet, row, CONFIG.COL_INITIAL_DECISION, decision.verdict + ' (' + confidence + '%) — ' + (decision.headline_decision || ''));
 
     // ── STEP 4: Synthesis Report (ALL applicants) ──
     setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 4: Building report...');
@@ -715,10 +790,10 @@ function processOne_(sheet, row) {
     writeSynthesis_(sheet, row, synthesis, research);
 
     // If APPROVED or REJECTED with sufficient confidence → done
-    if ((decision.verdict === 'APPROVED' || decision.verdict === 'REJECTED') && (decision.overall_confidence || 0) >= CONFIG.RESOLVE_THRESHOLD) {
+    if ((decision.verdict === 'APPROVED' || decision.verdict === 'REJECTED') && confidence >= 70) {
       writeOutput_(sheet, row, start, {
         verdict: decision.verdict,
-        confidence: decision.overall_confidence,
+        confidence: confidence,
         headline: decision.headline_decision,
         reasoning: decision.reasoning,
         whatFound: synthesis.what_was_found,
@@ -743,7 +818,11 @@ function processOne_(sheet, row) {
     setCell_(sheet, row, CONFIG.COL_STATUS, '⏳ Step 7: Final decision...');
     SpreadsheetApp.flush();
     const finalDecision = step7_finalDecision(app, synthesis, updatedSynthesis, decision);
-    setCell_(sheet, row, CONFIG.COL_FINAL_DECISION, finalDecision.verdict + ' (' + Math.round((finalDecision.confidence || 0) * 100) + '%) — ' + (finalDecision.headline_decision || ''));
+
+    // Recalculate confidence with updated verifications from deeper research
+    const finalVerifications = finalDecision.verifications || verifications;
+    const finalConfidence = calculateConfidence_(app, research, finalVerifications);
+    setCell_(sheet, row, CONFIG.COL_FINAL_DECISION, finalDecision.verdict + ' (' + finalConfidence + '%) — ' + (finalDecision.headline_decision || ''));
 
     // Merge synthesis: combine original + deeper research findings
     const mergedFound = [...(synthesis.what_was_found || []), ...(updatedSynthesis.updated_what_found || [])];
@@ -753,12 +832,12 @@ function processOne_(sheet, row) {
     // Update sources with new ones
     setCell_(sheet, row, CONFIG.COL_KEY_SOURCES, [...new Set(mergedSources)].join('\n'));
 
-    const finalVerdict = (finalDecision.confidence || 0) >= 0.70 && (finalDecision.verdict === 'APPROVED' || finalDecision.verdict === 'REJECTED')
+    const finalVerdict = finalConfidence >= 70 && (finalDecision.verdict === 'APPROVED' || finalDecision.verdict === 'REJECTED')
       ? finalDecision.verdict : 'FLAGGED';
 
     writeOutput_(sheet, row, start, {
       verdict: finalVerdict,
-      confidence: finalDecision.confidence || decision.overall_confidence,
+      confidence: finalConfidence,
       headline: finalDecision.headline_decision || decision.headline_decision,
       reasoning: decision.reasoning + '\n\n[After deeper research] ' + finalDecision.reasoning,
       whatFound: mergedFound,
@@ -832,7 +911,7 @@ function writeOutput_(sheet, row, start, data) {
   }
 
   setCell_(sheet, row, CONFIG.COL_STATUS, '✅ Complete');
-  setCell_(sheet, row, CONFIG.COL_CONFIDENCE, Math.round((data.confidence || 0) * 100) + '%');
+  setCell_(sheet, row, CONFIG.COL_CONFIDENCE, data.confidence + '%');
   setCell_(sheet, row, CONFIG.COL_HEADLINE, data.headline || '');
   setCell_(sheet, row, CONFIG.COL_REASONING, data.reasoning || '');
   setCell_(sheet, row, CONFIG.COL_LATENCY, elapsed + 's');
