@@ -363,6 +363,12 @@ function calculateConfidence_(app, research, verifications) {
   const attended = (app.prevAttendance || '').toLowerCase();
   if (attended === 'yes' || attended.indexOf('yes') !== -1) score += 10;
 
+  // PENALTY: Authoritarian praise found — force flag regardless of score
+  if (verifications.authoritarian_praise_found) score = Math.min(score, 30);
+
+  // PENALTY: Sanctions or criminal found — force flag/reject
+  if (verifications.sanctions_or_criminal_found) score = Math.min(score, 20);
+
   return score;
 }
 
@@ -420,24 +426,37 @@ function step2_webResearch(app) {
     }
   } catch (e) { research.errors.push('Person: ' + e.message); }
 
-  // Search 2: Organization
+  // Search 2: Organization — funders, investors, controversies
   if (app.org && app.org.length > 3) {
     try {
-      const d = exa_(app.org + ' organization', 5);
+      const d = exa_(app.org + ' organization founders funding investors controversy', 5);
       research.searches.push('org');
       for (const r of (d.results || [])) research.orgResults.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
     } catch (e) { research.errors.push('Org: ' + e.message); }
   }
 
-  // Search 3: News/activism
+  // Search 3: News/activism + controversy check
   try {
-    const d = exa_('"' + app.name + '" human rights OR activism OR conference', 5);
-    research.searches.push('news');
+    const d = exa_('"' + app.name + '" human rights OR activism OR conference OR sanctions OR charged OR convicted', 5);
+    research.searches.push('news+controversy');
     const urls = new Set(research.results.map(e => e.url));
     for (const r of (d.results || [])) {
       if (!urls.has(r.url)) research.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
     }
   } catch (e) { research.errors.push('News: ' + e.message); }
+
+  // Search 4: Region-specific red flag check (HRF vetting guide)
+  const regionTerms = detectRegionTerms_(app);
+  if (regionTerms) {
+    try {
+      const d = exa_('"' + app.name + '" ' + regionTerms, 5);
+      research.searches.push('region-redflags');
+      const urls = new Set(research.results.map(e => e.url));
+      for (const r of (d.results || [])) {
+        if (!urls.has(r.url)) research.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500), source: 'region_check' });
+      }
+    } catch (e) { research.errors.push('Region: ' + e.message); }
+  }
 
   // Add applicant-provided social links
   if (app.linkedin && app.linkedin.length > 5 && !research.linkedin) research.linkedin = app.linkedin;
@@ -473,43 +492,81 @@ function step2_webResearch(app) {
 
 
 // ============================================================
+// REGION DETECTION — HRF vetting guide regional search terms
+// ============================================================
+
+function detectRegionTerms_(app) {
+  const text = (app.org + ' ' + app.interest + ' ' + app.comments + ' ' + app.name).toLowerCase();
+
+  // Asia-Pacific
+  const asia = ['china','chinese','beijing','hong kong','taiwan','north korea','pyongyang','myanmar','burma','vietnam','cambodia','laos','india','modi','afghanistan','taliban','pakistan','bangladesh','nepal','sri lanka','thailand','philippines','indonesia','malaysia','singapore'];
+  if (asia.some(t => text.indexOf(t) !== -1)) return 'Xi Jinping OR Kim Jong Un OR Mao Zedong OR "Belt and Road" OR Uyghur OR Tibet OR Hindutva OR Taliban';
+
+  // Europe & Central Asia
+  const eca = ['russia','russian','moscow','ukraine','belarus','minsk','azerbaijan','baku','turkey','ankara','georgia','tbilisi','uzbek','tajik','turkmen','kazakh','kyrgyz','armenia'];
+  if (eca.some(t => text.indexOf(t) !== -1)) return 'Putin OR Lukashenko OR Aliyev OR Crimea OR "war in Ukraine"';
+
+  // Africa
+  const africa = ['nigeria','kenya','ethiopia','somalia','somaliland','sudan','south sudan','rwanda','congo','uganda','tanzania','zimbabwe','cameroon','mali','libya','eritrea','senegal','ghana','ivory coast','mozambique','angola','madagascar'];
+  if (africa.some(t => text.indexOf(t) !== -1)) return 'Kagame OR Gaddafi OR Putin OR "Wagner Group" OR "Russia Africa"';
+
+  // Americas
+  const americas = ['venezuela','venezuelan','caracas','nicaragua','managua','cuba','cuban','havana','el salvador','bukele','colombia','brazil','mexico','argentina','chile','ecuador','peru','bolivia','honduras','guatemala','haiti'];
+  if (americas.some(t => text.indexOf(t) !== -1)) return 'Maduro OR Ortega OR Bukele OR Castro OR Chavez OR Guevara';
+
+  // MENA
+  const mena = ['saudi','arabia','riyadh','jeddah','iran','iranian','tehran','egypt','egyptian','cairo','syria','syrian','iraq','iraqi','yemen','qatar','uae','emirates','dubai','abu dhabi','bahrain','oman','jordan','lebanon','morocco','tunisia','algeria','libya','palestine','israel'];
+  if (mena.some(t => text.indexOf(t) !== -1)) return '"Mohammed bin Salman" OR MBS OR Khamenei OR "al-Assad" OR Sisi OR Mubarak OR sportswashing OR "Vision 2030" OR "Muslim Brotherhood"';
+
+  // Global dictator check — always search for universally problematic praise
+  return null;
+}
+
+
+// ============================================================
 // STEP 3: INITIAL DECISION (gpt-5)
 // ============================================================
 
-const DECISION_PROMPT = `You are a vetting decision-maker for the Oslo Freedom Forum (HRF).
+const DECISION_PROMPT = `You are a vetting decision-maker for the Oslo Freedom Forum, hosted by the Human Rights Foundation (HRF).
 
-You will receive an applicant's application AND web research results from Exa.ai. Make a decision.
+You will receive an applicant's application AND web research results. Make a decision applying HRF's vetting standards.
 
-APPROVE if ANY:
-- Person/org found in web results with legitimate context
-- Bitcoin/crypto = STRONG POSITIVE (HRF Bitcoin program)
-- Students, academics, early-career = welcome (thin web presence is normal)
-- Verified NGO/civil society/media/startup
-- Genuine human rights knowledge in interest statement
-- Refugee support, press freedom, digital rights, financial inclusion
+APPROVE if:
+- Person/org verified in web results with legitimate civil society, NGO, media, academic, or startup context
+- Bitcoin/crypto involvement = STRONG POSITIVE (HRF runs a Bitcoin program)
+- Students, academics, early-career activists = welcome even with thin web presence
+- Refugee support, press freedom, digital rights, financial inclusion work confirmed
 - When in doubt between APPROVE and FLAG → lean APPROVE if no red flags
 
 REJECT if:
-- Government ministry/state security in Not Free country (Afghanistan, Belarus, China, Cuba, Egypt, Eritrea, Ethiopia, Iran, Myanmar, North Korea, Russia, Saudi Arabia, Somalia, South Sudan, Sudan, Syria, Tajikistan, Turkmenistan, UAE, Uzbekistan, Venezuela, Yemen)
-- Promoting government agenda/propaganda/surveillance
-- Exception: documented dissent → FLAG instead
+- Government ministry/state security in a Not Free country
+- Promoting government agenda, propaganda, or surveillance
+- Web research reveals praise for authoritarian leaders or regimes
+- Evidence of hate speech, xenophobia, homophobia, or violent advocacy
+- Subject to international sanctions
+- Exception: if evidence shows documented dissent against their own government → FLAG instead of REJECT
 
-FLAG if ANY (these ALWAYS require human review, even if everything else checks out):
-- ANY government official, ministry employee, or state-affiliated person from ANY country — this ALWAYS requires human review regardless of how legitimate they appear
-- Web research surfaces a deceased person with the same or very similar name — identity confusion risk requires human verification
+FLAG if ANY (these ALWAYS require human review):
+- ANY government official, ministry employee, or state-affiliated person from ANY country
+- Web research surfaces a deceased person with same/similar name
+- Evidence of praise for authoritarian leaders (Castro, Chavez, Putin, Xi, MBS, Kagame, etc.) — even subtle praise
+- Excessive political partisanship or false equivalence between democracies and dictatorships
+- Financial or commercial dealings with authoritarian regimes or their entities
+- Connections to sportswashing campaigns (e.g., Saudi/UAE/Qatar sports ventures)
+- Criminal charges, investigations, or fraud allegations found
 - Cannot verify identity AND affiliations are vague/concerning
-- Conflicting signals (e.g., name matches multiple different people)
-- Applicant's title is vague (e.g., "Employer" instead of a specific role)
-- Application details are sparse (no socials, no specific forums, generic interest statement)
+- Conflicting signals or name matches multiple people
+- Org has ties to authoritarian state funding or investors
+- Application associated with any boycott against HRF
 
-IMPORTANT: Do NOT provide a confidence score. Instead, answer these verification questions as true/false based ONLY on what the web research actually confirmed:
+IMPORTANT: Do NOT provide a confidence score. Answer verification questions as true/false based ONLY on what web research confirmed:
 
 Respond JSON:
 {
   "verdict": "APPROVED" or "FLAGGED" or "REJECTED",
   "headline_decision": "One sentence: what was confirmed and why this decision",
   "reasoning": "2-4 sentences",
-  "flag_reason": "If FLAGGED: what specific info is missing that would resolve this?",
+  "flag_reason": "If FLAGGED: what specific info is missing or what concern needs human review?",
   "verifications": {
     "name_found_in_results": true/false,
     "org_verified": true/false,
@@ -517,7 +574,10 @@ Respond JSON:
     "social_presence_found": true/false,
     "hr_work_confirmed": true/false,
     "red_flags_found": true/false,
-    "interest_substantive": true/false
+    "interest_substantive": true/false,
+    "authoritarian_praise_found": true/false,
+    "govt_affiliation_found": true/false,
+    "sanctions_or_criminal_found": true/false
   }
 }`;
 
@@ -554,12 +614,12 @@ IMPORTANT FRAMING RULES:
 Your report MUST include:
 1. **Identity Summary**: Who is this person? Lead with confirmed facts.
 2. **Professional Background**: Confirmed roles, education, expertise — cite URLs. If unverified, give a next step.
-3. **Organization Verification**: What was confirmed about the org. If unverified: "NEXT STEP: Check [specific registry/database] for [org name]"
-4. **Public Presence**: Confirmed articles, media, conferences — cite URLs.
-5. **Human Rights Alignment**: Confirmed evidence of HR work, activism, journalism, Bitcoin/freedom tech.
-6. **Government Connections**: Any confirmed govt ties. If ambiguous: "NEXT STEP: Search [country] government directory for [name]"
-7. **Red Flags**: Only confirmed concerns with evidence. Speculation goes in next steps.
-8. **Next Steps to Complete Vetting**: NOT gaps — specific actions. Each must have a method.
+3. **Organization Verification**: What was confirmed about the org — including ownership, funders, investors, and any ties to authoritarian states. If unverified: "NEXT STEP: Check [specific registry/database] for [org name]"
+4. **Public Presence**: Confirmed articles, media, social media posts, conferences — cite URLs. Note any concerning social media stances found.
+5. **Human Rights Alignment**: Confirmed evidence of HR work, activism, journalism, Bitcoin/freedom tech. Also note any evidence of praise for authoritarian regimes, false equivalence between democracies and dictatorships, or excessive political partisanship.
+6. **Government Connections**: Any confirmed govt ties. If ambiguous: "NEXT STEP: Search [country] government directory for [name]". Note if they are a current government official (requires human review per HRF policy).
+7. **Red Flags**: Confirmed concerns with evidence — including hate speech, violence advocacy, authoritarian praise, sanctions, criminal history, sportswashing ties, or HRF boycott association. Speculation goes in next steps.
+8. **Next Steps to Complete Vetting**: NOT gaps — specific actions. Each must have a method. Include sanctions check (opensanctions.org) if not yet done.
 
 Then provide three structured output fields:
 
@@ -638,13 +698,23 @@ function step5_deeperResearch(app, decision, synthesis) {
     for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
   } catch (e) { deepResults.errors.push('Exact: ' + e.message); }
 
-  // Search 6: Org + country context (catches local-language results)
+  // Search 6: Org — funders, investors, authoritarian ties
   if (app.org && app.org.length > 3) {
     try {
-      const d = exa_(app.org + ' founded mission team', 5);
+      const d = exa_(app.org + ' funding investors government ties controversy sanctions', 5);
       deepResults.searches.push('org-deep');
       for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500) });
     } catch (e) { deepResults.errors.push('Org-deep: ' + e.message); }
+  }
+
+  // Search 7b: Social media stance check (HRF vetting guide — check for authoritarian praise)
+  const regionTerms = detectRegionTerms_(app);
+  if (regionTerms) {
+    try {
+      const d = exa_('"' + app.name + '" ' + regionTerms, 5);
+      deepResults.searches.push('regime-stance');
+      for (const r of (d.results || [])) deepResults.results.push({ title: r.title || '', url: r.url || '', text: (r.text || '').substring(0, 1500), source: 'regime_check' });
+    } catch (e) { deepResults.errors.push('Regime-stance: ' + e.message); }
   }
 
   // Search 7: Follow up on specific next-step URLs or topics
@@ -713,20 +783,33 @@ function step6_updatedSynthesis(app, synthesis, deepResearch, decision) {
 // STEP 7: FINAL DECISION (gpt-5 — FLAGGED only)
 // ============================================================
 
-const FINAL_DECISION_PROMPT = `You are a senior vetting decision-maker resolving a flagged case for the Oslo Freedom Forum.
+const FINAL_DECISION_PROMPT = `You are a senior vetting decision-maker resolving a flagged case for the Oslo Freedom Forum (HRF).
 
-This applicant was flagged in the initial review. Additional targeted research has been conducted. Make a final decision.
+This applicant was flagged in the initial review. Additional targeted research has been conducted. Make a final decision applying HRF's full vetting standards.
 
-Rules:
-- Bitcoin/crypto = POSITIVE
-- Govt ministry Not Free country = REJECT (unless documented dissent)
+APPROVE if:
+- Identity confirmed + no red flags + legitimate civil society/NGO/media/academic work
+- Bitcoin/crypto involvement = POSITIVE
 - Students/early-career with confirmed identity = APPROVE
-- ANY government official/ministry employee from ANY country = MUST stay FLAGGED — even if identity is confirmed, government affiliations always require human review
-- Web research found a deceased person with same/similar name = MUST stay FLAGGED — identity confusion risk requires human verification
-- Name matched multiple different people = MUST stay FLAGGED
-- If STILL ambiguous after deeper research = keep FLAGGED with very specific reviewer instructions
 
-IMPORTANT: Do NOT provide a confidence score. Instead, answer the same verification questions — now updated with what the deeper research confirmed:
+MUST stay FLAGGED (always require human review):
+- ANY government official/ministry employee from ANY country — even if fully verified
+- Web research found a deceased person with same/similar name
+- Name matched multiple different people
+- Evidence of praise for authoritarian leaders or regimes, even subtle
+- Excessive political partisanship or equating democracies with dictatorships
+- Potential heckler or disruptor risk identified
+- Connections to sportswashing, authoritarian state investments, or boycotts against HRF
+- Criminal allegations or sanctions matches found but unconfirmed
+
+REJECT if:
+- Confirmed government role in a Not Free country (unless documented dissent → keep FLAGGED)
+- Confirmed hate speech, violence advocacy, xenophobia, or homophobia
+- Confirmed international sanctions
+- Confirmed praise of authoritarian regimes with no countering evidence
+- Confirmed financial dealings with dictatorships
+
+If STILL ambiguous = keep FLAGGED with very specific reviewer instructions.
 
 Respond JSON:
 {
@@ -741,7 +824,10 @@ Respond JSON:
     "social_presence_found": true/false,
     "hr_work_confirmed": true/false,
     "red_flags_found": true/false,
-    "interest_substantive": true/false
+    "interest_substantive": true/false,
+    "authoritarian_praise_found": true/false,
+    "govt_affiliation_found": true/false,
+    "sanctions_or_criminal_found": true/false
   }
 }`;
 
